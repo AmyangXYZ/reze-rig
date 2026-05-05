@@ -4,7 +4,8 @@ import { Engine, Model, Vec3 } from "reze-engine"
 import { useCallback, useEffect, useRef, useState } from "react"
 import Loading from "@/components/loading"
 import { FBXLoader } from "@/lib/fbx"
-import { retargetClips } from "@/lib/retarget"
+import { buildBindReferenceFromClip, retargetClips } from "@/lib/retarget"
+import type { BoneRestPose } from "@/lib/fbx"
 import { convertToVMD, downloadBlob, getBlobURL } from "@/lib/vmd-writer"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
@@ -17,6 +18,7 @@ export default function Home() {
   const engineRef = useRef<Engine | null>(null)
   const modelRef = useRef<Model | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const ueBindRefRef = useRef<Map<string, BoneRestPose> | null>(null)
   const [engineError, setEngineError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [converting, setConverting] = useState(false)
@@ -42,7 +44,7 @@ export default function Home() {
         ? await fbxLoader.loadJsonAsync(fbxUrl)
         : await fbxLoader.loadAsync(fbxUrl)
 
-      const mmdClips = retargetClips(rawClips)
+      const mmdClips = retargetClips(rawClips, { bindReference: ueBindRefRef.current })
 
       if (mmdClips.length > 0) {
         const clip = mmdClips[0]
@@ -98,6 +100,18 @@ export default function Home() {
         setLoading(false)
         engine.runRenderLoop()
         model.setMorphWeight("抗穿模", 0.5)
+
+        // Pre-load Idle.fbx as the canonical bind reference for UE-Mannequin / Unity
+        // Humanoid clips. Some Unity per-pose exports (Run_Lfoot, Run_Stop_*) stash the
+        // first animation frame as the rest pose; the retarget needs an actual bind to
+        // subtract against.
+        try {
+          const refLoader = new FBXLoader()
+          const refClips = await refLoader.loadAsync("/fbx/Idle.fbx")
+          if (refClips[0]) ueBindRefRef.current = buildBindReferenceFromClip(refClips[0])
+        } catch (e) {
+          console.warn("Failed to load UE bind reference (Idle.fbx):", e)
+        }
 
         // Auto-load demo FBX file
         await loadFBXAndPlay("/fbx/Rumba Dancing.fbx", "Rumba Dancing.vmd")

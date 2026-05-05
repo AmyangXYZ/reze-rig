@@ -373,11 +373,18 @@ interface BoneInfo {
 	worldBind: Quat;
 }
 
-function buildBoneInfoMap(clip: AnimationClip): Map<string, BoneInfo> {
+function buildBoneInfoMap(clip: AnimationClip, bindRef?: Map<string, BoneRestPose> | null): Map<string, BoneInfo> {
 	const restByCanonical = new Map<string, BoneRestPose | null>();
 	for (const t of clip.tracks) {
 		const c = canonicalizeBoneName(t.name);
-		if (!restByCanonical.has(c)) restByCanonical.set(c, t.restPose ?? null);
+		if (restByCanonical.has(c)) continue;
+		// Prefer bind-reference rest when provided. Per-clip rest pose in some Unity/UE
+		// exports (e.g., mid-cycle "stride pose" clips) is a snapshot of frame 0 rather
+		// than the canonical T/A bind, which makes the world-delta computation reference
+		// the wrong baseline. The bind reference (extracted from a known-good clip such
+		// as Idle.fbx) gives the actual canonical bind for the rig.
+		const ref = bindRef?.get(c);
+		restByCanonical.set(c, ref ?? t.restPose ?? null);
 	}
 
 	// BFS topological order: parent before child.
@@ -530,13 +537,59 @@ function computeArmBias(
 	return quatFromVec3(mmdMeshDir, srcDirMmd);
 }
 
-export function retargetClips(clips: AnimationClip[]): RetargetedClip[] {
-	return clips.map(retargetOneClip);
+export interface RetargetOptions {
+	/**
+	 * Override rest poses keyed by canonical bone name. When provided, the retarget
+	 * uses these instead of each clip's own track `restPose`. Some Unity/UE per-pose
+	 * exports (e.g., mid-cycle "stride pose" clips) embed the first animation frame
+	 * as the rest pose, which makes "delta from rest" reference the wrong baseline.
+	 * Building this map from a known-good clip (an idle, or the rig's bind/T-pose
+	 * file) gives the retarget a stable canonical bind to subtract against.
+	 */
+	bindReference?: Map<string, BoneRestPose> | null;
 }
 
-function retargetOneClip(clip: AnimationClip): RetargetedClip {
+/**
+ * Whether a clip's bones look like UE-Mannequin / Unity Humanoid (vs Mixamo). We probe
+ * names that are unique to UE-Mannequin (e.g., `pelvis`, `spine_01`, `upperarm_l`) —
+ * not generics like `head` that both rigs share.
+ */
+const UE_DISTINCTIVE_NAMES = new Set([
+	'pelvis', 'spine_01', 'spine_02', 'spine_03', 'neck_01',
+	'clavicle_l', 'clavicle_r', 'upperarm_l', 'upperarm_r',
+	'lowerarm_l', 'lowerarm_r', 'thigh_l', 'thigh_r', 'calf_l', 'calf_r',
+]);
+export function isUEMannequinClip(clip: AnimationClip): boolean {
+	for (const t of clip.tracks) {
+		const stripped = t.name.replace(/^mixamorig:/i, '').trim().toLowerCase();
+		if (UE_DISTINCTIVE_NAMES.has(stripped)) return true;
+	}
+	return false;
+}
+
+/** Extract a canonical-bone-name → BoneRestPose map from a clip whose first frame is the bind. */
+export function buildBindReferenceFromClip(clip: AnimationClip): Map<string, BoneRestPose> {
+	const map = new Map<string, BoneRestPose>();
+	for (const t of clip.tracks) {
+		if (!t.restPose) continue;
+		const c = canonicalizeBoneName(t.name);
+		if (!map.has(c)) map.set(c, t.restPose);
+	}
+	return map;
+}
+
+export function retargetClips(clips: AnimationClip[], opts?: RetargetOptions): RetargetedClip[] {
+	return clips.map(c => retargetOneClip(c, opts));
+}
+
+function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
 	const duration = calculateDuration(clip);
-	const info = buildBoneInfoMap(clip);
+	// Apply the bind reference only when it actually matches the rig — using a UE
+	// reference on a Mixamo clip (or vice versa) would corrupt the bind because the
+	// two encode bind orientation differently (Mixamo: Pre/Post + identity Lcl;
+	// UE: large Lcl, no Pre/Post).
+	const useBindRef = opts?.bindReference && isUEMannequinClip(clip) ? opts.bindReference : null;
+	const info = buildBoneInfoMap(clip, useBindRef);
 	dumpWorldBindOnce(clip.name, info);
 
 	// First track per canonical name (raw FBX may have e.g. mixamorig:Hips and a duplicate model node).
