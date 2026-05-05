@@ -167,6 +167,51 @@ function q4Rot(q: Q4, v: [number, number, number]): [number, number, number] {
   return [r[0], r[1], r[2]]
 }
 
+/**
+ * Build the rotation that maps local axes (+X, +Y, +Z) onto a bone-aligned world frame:
+ *   +X → `forward` (the bone's tip direction)
+ *   +Y → component of `refUp` orthogonal to forward (Gram-Schmidt)
+ *   +Z → forward × up
+ * `fallbackUp` is substituted if `forward` is (nearly) parallel to `refUp`.
+ */
+function quatFromForwardUp(
+  forward: [number, number, number],
+  refUp: [number, number, number],
+  fallbackUp: [number, number, number] = [0, 0, 1],
+): Q4 {
+  const fl = Math.hypot(forward[0], forward[1], forward[2])
+  const fx = forward[0] / fl, fy = forward[1] / fl, fz = forward[2] / fl
+  let rux = refUp[0], ruy = refUp[1], ruz = refUp[2]
+  let dotFU = fx * rux + fy * ruy + fz * ruz
+  if (Math.abs(dotFU) > 0.99) {
+    rux = fallbackUp[0]; ruy = fallbackUp[1]; ruz = fallbackUp[2]
+    dotFU = fx * rux + fy * ruy + fz * ruz
+  }
+  let ux = rux - dotFU * fx, uy = ruy - dotFU * fy, uz = ruz - dotFU * fz
+  const ul = Math.hypot(ux, uy, uz) || 1
+  ux /= ul; uy /= ul; uz /= ul
+  const sx = fy * uz - fz * uy, sy = fz * ux - fx * uz, sz = fx * uy - fy * ux
+  const m00 = fx, m01 = ux, m02 = sx
+  const m10 = fy, m11 = uy, m12 = sy
+  const m20 = fz, m21 = uz, m22 = sz
+  const trace = m00 + m11 + m22
+  let qx: number, qy: number, qz: number, qw: number
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2
+    qw = 0.25 * s; qx = (m21 - m12) / s; qy = (m02 - m20) / s; qz = (m10 - m01) / s
+  } else if (m00 > m11 && m00 > m22) {
+    const s = Math.sqrt(1 + m00 - m11 - m22) * 2
+    qw = (m21 - m12) / s; qx = 0.25 * s; qy = (m01 + m10) / s; qz = (m02 + m20) / s
+  } else if (m11 > m22) {
+    const s = Math.sqrt(1 + m11 - m00 - m22) * 2
+    qw = (m02 - m20) / s; qx = (m01 + m10) / s; qy = 0.25 * s; qz = (m12 + m21) / s
+  } else {
+    const s = Math.sqrt(1 + m22 - m00 - m11) * 2
+    qw = (m10 - m01) / s; qx = (m02 + m20) / s; qy = (m12 + m21) / s; qz = 0.25 * s
+  }
+  return q4Normalize([qx, qy, qz, qw])
+}
+
 /* ============================================================================
  * Retarget context.
  * ========================================================================= */
@@ -177,6 +222,16 @@ interface MappedBone {
   erIdx: number
   /** Nearest mapped ancestor in the ER tree (its MMD name). Null if this is a root-mapped bone. */
   parentMmdName: string | null
+  /**
+   * Frame-alignment rotation `F = F_mmd · F_er⁻¹` for transport-style retarget.
+   *   F_er  = B_er — the ER bone's full world bind rotation (real 3-axis frame).
+   *   F_mmd = quatFromForwardUp(d_mmd_bind, ER_local_Y_in_world) — synthetic MMD frame
+   *           with forward = MMD bone's natural tip direction and up reference taken
+   *           from ER's local Y, so F_mmd and F_er share their "up" axis as much as
+   *           possible (eliminates the axial-roll mismatch a world+Y up reference causes).
+   * `null` when the bone has no available tip — falls back to plain delta.
+   */
+  frameAlign: Q4 | null
 }
 
 export interface HkxRetargetContext {
@@ -193,8 +248,12 @@ export interface HkxRetargetContext {
 }
 
 export interface HkxRetargetOptions {
-  /** Reserved for future use. */
-  _reserved?: never
+  /**
+   * Per-MMD-bone world-space tip direction (unit vector pointing from the bone to its
+   * natural successor — e.g. 左腕 → 左ひじ). Used to build the synthetic MMD bind frame
+   * for transport. Bones missing from this map fall back to plain delta.
+   */
+  mmdBoneBindDirs?: Record<string, [number, number, number]>
 }
 
 export interface FrameResult {
@@ -238,7 +297,7 @@ function fkWorldPositions(
   return wPos
 }
 
-export function createRetargetContext(hkx: HkxAnimation, _options?: HkxRetargetOptions): HkxRetargetContext {
+export function createRetargetContext(hkx: HkxAnimation, options?: HkxRetargetOptions): HkxRetargetContext {
   const n = hkx.bones.length
 
   // Precompute ER bind-pose world rotations and positions.
@@ -260,7 +319,9 @@ export function createRetargetContext(hkx: HkxAnimation, _options?: HkxRetargetO
   const nameToIdx = new Map<string, number>()
   for (let i = 0; i < n; i++) nameToIdx.set(hkx.bones[i].name, i)
 
-  // Build mapped bone list with nearest mapped ancestor.
+  const mmdDirs = options?.mmdBoneBindDirs ?? {}
+
+  // Build mapped bone list with nearest mapped ancestor and frame-alignment quat.
   const mappedBones: MappedBone[] = []
   for (const [erName, mmdName] of Object.entries(ER_BONE_MAP)) {
     const erIdx = nameToIdx.get(erName)
@@ -279,7 +340,42 @@ export function createRetargetContext(hkx: HkxAnimation, _options?: HkxRetargetO
       p = hkx.bones[p].parentIndex
     }
 
-    mappedBones.push({ erName, mmdName, erIdx, parentMmdName })
+    // 下半身 has MMD's "inherit rotation" trick that cancels its rotation in the leg
+    // chain (via 腰キャンセル at -100%) and is bypassed for upper body (上半身's actual
+    // PMX parent is 腰, not 下半身). So 下半身's animated rotation never reaches these
+    // bones in engine FK. Override their target parent to センター so VMD parent-local
+    // doesn't subtract a rotation the engine isn't applying.
+    if (parentMmdName === "下半身" && (mmdName === "上半身" || mmdName === "左足" || mmdName === "右足")) {
+      parentMmdName = "センター"
+    }
+
+    // Frame alignment: F = F_mmd · F_er⁻¹. Up reference for F_mmd is ER's local Y in
+    // world, so F_mmd's "up" matches F_er's "up" — the conjugation cleanly maps the
+    // rotation without introducing axial roll.
+    //
+    // Skip transport when ER and MMD bone forwards disagree by more than 60° (e.g. ER
+    // Pelvis points up to spine while MMD 下半身 points down to legs — a ~180° flip
+    // that would invert hip-twist direction). Falls back to plain delta, which is
+    // correct for direction-mismatched bones because their rotations live in the
+    // shared world frame anyway.
+    let frameAlign: Q4 | null = null
+    const raw = mmdDirs[mmdName]
+    if (raw) {
+      const l = Math.hypot(raw[0], raw[1], raw[2])
+      if (l > 1e-6) {
+        const dMmd: [number, number, number] = [raw[0] / l, raw[1] / l, raw[2] / l]
+        const fEr = erBindWorldRot[erIdx]
+        const dEr = q4Rot(fEr, [1, 0, 0]) // ER bone forward in world (+X local)
+        const dot = dMmd[0] * dEr[0] + dMmd[1] * dEr[1] + dMmd[2] * dEr[2]
+        if (dot > 0.5) {
+          const erLocalY = q4Rot(fEr, [0, 1, 0])
+          const fMmd = quatFromForwardUp(dMmd, erLocalY)
+          frameAlign = q4Normalize(q4Mul(fMmd, q4Conj(fEr)))
+        }
+      }
+    }
+
+    mappedBones.push({ erName, mmdName, erIdx, parentMmdName, frameAlign })
   }
 
   // Whole-body translation source. Master is the top-level ER bone that carries
@@ -318,10 +414,19 @@ function retargetFrame(ctx: HkxRetargetContext, frameIdx: number): FrameResult {
   // Step 2: FK → animated ER world rotations.
   const erAnimWorldRot = fkWorldRotations(hkx, animLocal)
 
-  // Step 3: per mapped bone, W_target = R_er · E⁻¹ (ER world delta from bind).
+  // Step 3: per mapped bone, transport ER world delta into MMD's bind frame.
+  //   Δ_er     = R_er · B_er⁻¹           (world delta in ER's frame)
+  //   W_target = F · Δ_er · F⁻¹          (transport via F = F_mmd · F_er⁻¹)
+  // Bones without a tip (no F) fall back to plain delta (F = identity).
   const targetByMmd: Record<string, Q4> = {}
   for (const bone of mappedBones) {
-    targetByMmd[bone.mmdName] = q4Mul(erAnimWorldRot[bone.erIdx], q4Conj(erBindWorldRot[bone.erIdx]))
+    const deltaEr = q4Mul(erAnimWorldRot[bone.erIdx], q4Conj(erBindWorldRot[bone.erIdx]))
+    if (bone.frameAlign) {
+      const F = bone.frameAlign
+      targetByMmd[bone.mmdName] = q4Normalize(q4Mul(q4Mul(F, deltaEr), q4Conj(F)))
+    } else {
+      targetByMmd[bone.mmdName] = deltaEr
+    }
   }
 
   // Step 4: q_vmd = W_target(mmd_parent)⁻¹ · W_target(mmd_b).

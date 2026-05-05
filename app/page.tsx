@@ -35,8 +35,12 @@ export default function Home() {
 
     try {
       const fbxLoader = new FBXLoader()
-      const rawClips = await fbxLoader.loadAsync(fbxUrl)
-      console.log(rawClips)
+      const isJson =
+        (fileName?.toLowerCase().endsWith(".json") ?? false) ||
+        fbxUrl.split("?")[0].toLowerCase().endsWith(".json")
+      const rawClips = isJson
+        ? await fbxLoader.loadJsonAsync(fbxUrl)
+        : await fbxLoader.loadAsync(fbxUrl)
 
       const mmdClips = retargetClips(rawClips)
 
@@ -116,7 +120,7 @@ export default function Home() {
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file && file.name.toLowerCase().endsWith('.fbx')) {
+    if (file && /\.(fbx|json)$/i.test(file.name)) {
       handleFBXUpload(file)
     }
     // Reset input so same file can be selected again
@@ -259,7 +263,7 @@ export default function Home() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".fbx"
+            accept=".fbx,.json,application/json"
             onChange={handleFileChange}
             className="hidden"
           />

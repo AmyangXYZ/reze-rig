@@ -49,6 +49,59 @@ type ThreeSceneBundle = {
 
 const MMD_MAPPABLE_BONES = new Set(Object.keys(ER_BONE_MAP))
 
+interface MmdSkeletonBone {
+  index: number
+  name: string
+  parentIndex: number
+  worldPosition: number[]
+}
+
+interface MmdSkeletonDump {
+  bones: MmdSkeletonBone[]
+}
+
+/**
+ * Build per-MMD-bone world-space tip direction from the MMD model's intrinsic geometry:
+ * average direction toward all direct children. This captures each bone's natural
+ * orientation (e.g. 下半身 → averaged direction toward legs+butt physics ≈ down,
+ * 上半身2 → averaged toward neck+shoulders+chest ≈ up, since left/right shoulders cancel).
+ * Uses ONLY the MMD model — no ER chain mapping — so each bone's direction matches what
+ * the MMD mesh expects, avoiding direction mismatches like ER-Pelvis-up vs MMD-下半身-down.
+ *
+ * Bones with no children (terminal mapped bones like 左つま先) get no entry → fall back to
+ * plain delta in the retarget.
+ */
+function buildMmdBindDirs(mmdSkel: MmdSkeletonDump): Record<string, [number, number, number]> {
+  const mmdChildren = new Map<number, number[]>()
+  for (const b of mmdSkel.bones) {
+    if (b.parentIndex >= 0) {
+      const arr = mmdChildren.get(b.parentIndex)
+      if (arr) arr.push(b.index)
+      else mmdChildren.set(b.parentIndex, [b.index])
+    }
+  }
+
+  const out: Record<string, [number, number, number]> = {}
+  const mappedMmdNames = new Set(Object.values(ER_BONE_MAP))
+  for (const mmdBone of mmdSkel.bones) {
+    if (!mappedMmdNames.has(mmdBone.name)) continue
+    const childIdxs = mmdChildren.get(mmdBone.index)
+    if (!childIdxs || childIdxs.length === 0) continue
+
+    let sx = 0, sy = 0, sz = 0
+    for (const ci of childIdxs) {
+      const c = mmdSkel.bones[ci]
+      sx += c.worldPosition[0] - mmdBone.worldPosition[0]
+      sy += c.worldPosition[1] - mmdBone.worldPosition[1]
+      sz += c.worldPosition[2] - mmdBone.worldPosition[2]
+    }
+    const l = Math.hypot(sx, sy, sz)
+    if (l < 1e-6) continue
+    out[mmdBone.name] = [sx / l, sy / l, sz / l]
+  }
+  return out
+}
+
 function rotateVecByQuat(q: Quat, v: Vec3): Vec3 {
   const t = q.clone().multiply(new Quat(v.x, v.y, v.z, 0))
   const r = t.multiply(q.clone().conjugate())
@@ -108,7 +161,7 @@ export default function HkxComparePage() {
   const modelRef = useRef<Model | null>(null)
   const hkxRef = useRef<HkxAnimation | null>(null)
   const retargetCtxRef = useRef<HkxRetargetContext | null>(null)
-  const loggedHkxExportRef = useRef(false)
+  const mmdSkeletonRef = useRef<MmdSkeletonDump | null>(null)
 
   const playRafRef = useRef<number | null>(null)
   const playStartRef = useRef(0)
@@ -399,7 +452,10 @@ export default function HkxComparePage() {
 
         hkxRef.current = hkx
         animDataRef.current = anim
-        const retargetCtx = createRetargetContext(hkx)
+        const mmdBoneBindDirs = mmdSkeletonRef.current
+          ? buildMmdBindDirs(mmdSkeletonRef.current)
+          : undefined
+        const retargetCtx = createRetargetContext(hkx, { mmdBoneBindDirs })
         retargetCtxRef.current = retargetCtx
 
         // One-shot: uncomment to dump the ER skeleton JSON to the console.
@@ -566,8 +622,14 @@ export default function HkxComparePage() {
 
   const bootstrapPage = useCallback(async () => {
     await initEngine()
-    const manifestResp = await fetch("/hkx/manifest.json")
+    const [manifestResp, mmdSkelResp] = await Promise.all([
+      fetch("/hkx/manifest.json"),
+      fetch("/mmd-skeleton.json"),
+    ])
     if (!manifestResp.ok) throw new Error(`Failed to load /hkx/manifest.json (${manifestResp.status})`)
+    if (mmdSkelResp.ok) {
+      mmdSkeletonRef.current = (await mmdSkelResp.json()) as MmdSkeletonDump
+    }
     const manifest = (await manifestResp.json()) as HkxManifest
     const ids = manifest.animations ?? []
     setAnimIds(ids)

@@ -53,6 +53,109 @@ export interface PositionTrack {
 	positions: [number, number, number][];  // [x, y, z] for each keyframe
 }
 
+function degToRad(degrees: number): number {
+	return degrees * Math.PI / 180;
+}
+
+/** Older JSON mixed rad `lclRotation` with deg `preRotation`/`postRotation` (FBX Properties70). */
+function prePostEulerJsonToRadIfNeeded(a: number, b: number, c: number): [number, number, number] {
+	const m = Math.max(Math.abs(a), Math.abs(b), Math.abs(c));
+	if (m > 2.5) return [degToRad(a), degToRad(b), degToRad(c)];
+	return [a, b, c];
+}
+
+/** Deserialize animation clips exported as JSON (e.g. Unity/Tool dump matching our AnimationClip shape). */
+export function animationClipsFromJson(text: string): AnimationClip[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch (e) {
+		throw new Error(`Invalid animation JSON: ${e instanceof Error ? e.message : String(e)}`);
+	}
+	const list = Array.isArray(parsed) ? parsed : [parsed];
+	const clips: AnimationClip[] = [];
+	for (const item of list) {
+		if (!item || typeof item !== 'object') continue;
+		const o = item as Record<string, unknown>;
+		const name = typeof o.name === 'string' ? o.name : 'Clip';
+		const duration = typeof o.duration === 'number' ? o.duration : -1;
+		const rawTracks = Array.isArray(o.tracks) ? o.tracks : [];
+		const rawPos = Array.isArray(o.positionTracks) ? o.positionTracks : [];
+
+		const tracks: BoneTrack[] = rawTracks.map((t) => {
+			const tr = t as Record<string, unknown>;
+			const boneName = String(tr.name ?? '');
+			const times = (tr.times as number[]) || [];
+			const rawQuats = (tr.quats as Array<{ x: number; y: number; z: number; w: number }>) || [];
+			const quats = rawQuats.map((q) => new Quat(Number(q.x), Number(q.y), Number(q.z), Number(q.w)));
+			let restPose: BoneRestPose | null = null;
+			if (tr.restPose && typeof tr.restPose === 'object') {
+				const rp = tr.restPose as Record<string, unknown>;
+				const lr = rp.lclRotation;
+				const lt = rp.lclTranslation;
+				const pr = rp.preRotation;
+				const por = rp.postRotation;
+				if (Array.isArray(lr) && lr.length >= 3) {
+					restPose = {
+						lclRotation: [Number(lr[0]), Number(lr[1]), Number(lr[2])],
+						lclTranslation: Array.isArray(lt) && lt.length >= 3
+							? [Number(lt[0]), Number(lt[1]), Number(lt[2])]
+							: null,
+						preRotation: Array.isArray(pr) && pr.length >= 3
+							? prePostEulerJsonToRadIfNeeded(Number(pr[0]), Number(pr[1]), Number(pr[2]))
+							: null,
+						postRotation: Array.isArray(por) && por.length >= 3
+							? prePostEulerJsonToRadIfNeeded(Number(por[0]), Number(por[1]), Number(por[2]))
+							: null,
+					};
+				}
+			}
+			return {
+				name: boneName,
+				original_name: typeof tr.original_name === 'string' ? tr.original_name : boneName,
+				times,
+				quats,
+				restPose,
+			};
+		});
+
+		const positionTracks: PositionTrack[] = rawPos.map((p) => {
+			const pt = p as Record<string, unknown>;
+			const pname = String(pt.name ?? '');
+			const posList = (pt.positions as unknown[]) || [];
+			const positions: [number, number, number][] = posList.map((row) => {
+				if (Array.isArray(row) && row.length >= 3) {
+					return [Number(row[0]), Number(row[1]), Number(row[2])];
+				}
+				if (row && typeof row === 'object' && 'x' in row && 'y' in row && 'z' in row) {
+					const v = row as Record<string, number>;
+					return [Number(v.x), Number(v.y), Number(v.z)];
+				}
+				return [0, 0, 0];
+			});
+			return {
+				name: pname,
+				original_name: typeof pt.original_name === 'string' ? pt.original_name : pname,
+				times: (pt.times as number[]) || [],
+				positions,
+			};
+		});
+
+		if (tracks.length === 0 && positionTracks.length === 0) continue;
+		clips.push({
+			name,
+			duration,
+			tracks,
+			positionTracks,
+			hierarchy: undefined,
+		});
+	}
+	if (clips.length === 0) {
+		throw new Error('Animation JSON contained no tracks');
+	}
+	return clips;
+}
+
 export class FBXReaderNode {
 	public fbxNode: FBXNode;
 
@@ -181,20 +284,44 @@ export class FBXLoader {
 		});
 	}
 
+	/** Fetch URL as text and parse animation JSON (Unity-style dumps, same schema as AnimationClip). */
+	async loadJsonAsync(url: string): Promise<AnimationClip[]> {
+		const res = await fetch(this.path + url);
+		if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+		return animationClipsFromJson(await res.text());
+	}
+
+	private static urlLooksLikeJson(url: string): boolean {
+		const u = url.split('?')[0].toLowerCase();
+		return u.endsWith('.json') || u.endsWith('.json/');
+	}
+
 	load(
 		url: string,
 		onLoad?: (clips: AnimationClip[]) => void,
 		onProgress?: (progress: ProgressEvent) => void,
 		onError?: (error: Error) => void
 	) {
-		fetch(this.path + url)
-			.then(response => {
-				if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-				return response.arrayBuffer();
+		const fullUrl = this.path + url;
+		const asJson = FBXLoader.urlLooksLikeJson(fullUrl) || FBXLoader.urlLooksLikeJson(url);
+		const fetchPromise = asJson
+			? fetch(fullUrl).then(r => {
+				if (!r.ok) throw new Error(`HTTP error! status: ${r.status}`);
+				return r.text().then(t => ({ kind: 'json' as const, text: t }));
 			})
-			.then(buffer => {
+			: fetch(fullUrl).then(r => {
+				if (!r.ok) throw new Error(`HTTP error! status: ${r.status}`);
+				return r.arrayBuffer().then(buf => ({ kind: 'binary' as const, buffer: buf }));
+			});
+
+		fetchPromise
+			.then(payload => {
 				try {
-					const fbxData = this.parse(buffer);
+					if (payload.kind === 'json') {
+						if (onLoad) onLoad(animationClipsFromJson(payload.text));
+						return;
+					}
+					const fbxData = this.parse(payload.buffer);
 					const reader = new FBXReader(fbxData);
 					const clips = new AnimationParser(reader).parse();
 					if (onLoad) onLoad(clips);
@@ -434,12 +561,12 @@ class AnimationParser {
 				const y = preRotProp.prop(5, 'number');
 				const z = preRotProp.prop(6, 'number');
 				if (x !== undefined && y !== undefined && z !== undefined) {
-					return [x, y, z];
+					return [degToRad(x), degToRad(y), degToRad(z)];
 				}
 				// Fallback: try as array
 				const rot = preRotProp.prop(4, 'number[]');
 				if (rot && rot.length >= 3) {
-					return [rot[0], rot[1], rot[2]];
+					return [degToRad(rot[0]), degToRad(rot[1]), degToRad(rot[2])];
 				}
 			}
 		}
@@ -448,7 +575,7 @@ class AnimationParser {
 		if (preRotDirect) {
 			const rot = preRotDirect.prop(0, 'number[]');
 			if (rot && rot.length >= 3) {
-				return [rot[0], rot[1], rot[2]];
+				return [degToRad(rot[0]), degToRad(rot[1]), degToRad(rot[2])];
 			}
 		}
 		return null;
@@ -467,12 +594,12 @@ class AnimationParser {
 				const y = postRotProp.prop(5, 'number');
 				const z = postRotProp.prop(6, 'number');
 				if (x !== undefined && y !== undefined && z !== undefined) {
-					return [x, y, z];
+					return [degToRad(x), degToRad(y), degToRad(z)];
 				}
 				// Fallback: try as array
 				const rot = postRotProp.prop(4, 'number[]');
 				if (rot && rot.length >= 3) {
-					return [rot[0], rot[1], rot[2]];
+					return [degToRad(rot[0]), degToRad(rot[1]), degToRad(rot[2])];
 				}
 			}
 		}
@@ -481,7 +608,7 @@ class AnimationParser {
 		if (postRotDirect) {
 			const rot = postRotDirect.prop(0, 'number[]');
 			if (rot && rot.length >= 3) {
-				return [rot[0], rot[1], rot[2]];
+				return [degToRad(rot[0]), degToRad(rot[1]), degToRad(rot[2])];
 			}
 		}
 		return null;
@@ -790,58 +917,48 @@ class AnimationParser {
 		const interpolated = this.interpolateRotations(curves.x, curves.y, curves.z, eulerOrder);
 		const times = interpolated[0];
 		const values = interpolated[1];
-		
-		// NOTE: We do NOT apply PreRotation/PostRotation here.
-		// PreRotation/PostRotation define the bone's rest orientation in LOCAL space (relative to parent),
-		// not world space. The animation values are delta rotations from this rest pose.
-		// 
-		// The quaternions stored in FBX are in LOCAL_WITH_PARENT space (local to parent bone).
-		// This matches Blender's LOCAL_WITH_PARENT space, which is what we need for retargeting.
-		// 
-		// Applying PreRotation universally breaks bones that don't need it (like legs).
-		// Instead, we return RAW animation quaternions in local space and handle coordinate system
-		// conversion in retarget.ts based on bone type classification (invert_x, invert_z, etc.).
+
+		// Do **not** multiply Pre/Post onto R keys: Mixamo (and our sandwich + calibration) assume
+		// sampled quats are **Lcl ZXY** only; bind `q_a` uses Pre·Lcl·Post⁻¹ separately. Folding
+		// Pre·Post into keys was tried and wrenches limbs/torso (~180° style blowups).
 		void _preRotation;
 		void _postRotation;
-		
+
 		const quats: Quat[] = [];
-		
+
 		// Validate that values.length is a multiple of 3
 		if (values.length % 3 !== 0) {
 			console.warn(`generateQuaternions: values.length (${values.length}) is not a multiple of 3`);
 			return { times: [], quats: [] };
 		}
-		
+
 		// Validate that times and values arrays match
 		if (times.length !== values.length / 3) {
 			console.warn(`generateQuaternions: times.length (${times.length}) !== values.length/3 (${values.length / 3})`);
 			return { times: [], quats: [] };
 		}
-		
+
 		// Convert Euler values to quaternions
 		for (let i = 0; i < values.length; i += 3) {
 			const xRad = values[i];
 			const yRad = values[i + 1];
 			const zRad = values[i + 2];
-			
-			// Convert Euler to quaternion using the model's eulerOrder
+
 			const quat = eulerToQuaternionByOrder(xRad, yRad, zRad, eulerOrder);
-			
 			let resultQuat = new Quat(quat.x, quat.y, quat.z, quat.w);
-			
+
 			// Handle quaternion unrolling (prevent flips between frames)
 			if (i > 0) {
 				const prevQuat = quats[quats.length - 1];
-				const dot = prevQuat.x * resultQuat.x + prevQuat.y * resultQuat.y + 
+				const dot = prevQuat.x * resultQuat.x + prevQuat.y * resultQuat.y +
 				           prevQuat.z * resultQuat.z + prevQuat.w * resultQuat.w;
 				if (dot < 0) {
 					resultQuat = new Quat(-resultQuat.x, -resultQuat.y, -resultQuat.z, -resultQuat.w);
 				}
 			}
-			
+
 			quats.push(resultQuat);
 		}
-		
 
 		return { times, quats };
 	}
@@ -955,6 +1072,13 @@ class AnimationParser {
 		
 		return [times, values];
 	}
+}
+
+/** Parse binary FBX to clips (same pipeline as {@link FBXLoader} binary `fetch` path). */
+export function parseFbxToAnimationClips(buffer: ArrayBuffer): AnimationClip[] {
+	const fbxData = parseBinary(new Uint8Array(buffer));
+	const reader = new FBXReader(fbxData);
+	return new AnimationParser(reader).parse();
 }
 
 // Simple BinaryReader implementation
@@ -1204,10 +1328,21 @@ function convertFBXTimeToSeconds(time: number): number {
 	return time / 46186158000;
 }
 
-function degToRad(degrees: number): number {
-	return degrees * Math.PI / 180;
-}
 
+/**
+ * Intrinsic **ZYX** Euler → quaternion — matches Three.js `Quaternion.setFromEuler` / FBXLoader **default** `RotationOrder` for **PreRotation** and **PostRotation** (not the animated Lcl order).
+ */
+function eulerToQuatIntrinsicZYX(x: number, y: number, z: number): Quat {
+	const c1 = Math.cos(x / 2), s1 = Math.sin(x / 2);
+	const c2 = Math.cos(y / 2), s2 = Math.sin(y / 2);
+	const c3 = Math.cos(z / 2), s3 = Math.sin(z / 2);
+	return new Quat(
+		s1 * c2 * c3 - c1 * s2 * s3,
+		c1 * s2 * c3 + s1 * c2 * s3,
+		c1 * c2 * s3 - s1 * s2 * c3,
+		c1 * c2 * c3 + s1 * s2 * s3
+	).normalize();
+}
 
 // Euler to Quaternion conversion function for ZXY order
 function eulerToQuaternionZXY(z: number, x: number, y: number): { x: number, y: number, z: number, w: number } {
@@ -1231,6 +1366,51 @@ function eulerToQuaternionByOrder(x: number, y: number, z: number, _order: strin
 	// Always use ZXY order
 	if (_order !== 'ZXY') return { x: 0, y: 0, z: 0, w: 1 };
 	return eulerToQuaternionZXY(z, x, y);
+}
+
+/** Full local rest **Pre·Lcl·Post⁻¹** (Three.FBXLoader-compatible): Lcl **ZXY** (see {@link AnimationParser} curves), Pre/Post **ZYX**, Post stored inverted in file. */
+export function bindQuatFromBoneRestPose(rest: BoneRestPose | null): Quat | null {
+	if (!rest?.lclRotation || rest.lclRotation.length < 3) return null;
+	const t = eulerToQuaternionByOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], 'ZXY');
+	let q = new Quat(t.x, t.y, t.z, t.w);
+	if (rest.preRotation && rest.preRotation.length >= 3) {
+		const qPre = eulerToQuatIntrinsicZYX(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2]);
+		q = qPre.multiply(q);
+	}
+	if (rest.postRotation && rest.postRotation.length >= 3) {
+		const qPost = eulerToQuatIntrinsicZYX(rest.postRotation[0], rest.postRotation[1], rest.postRotation[2]);
+		// Three.FBXLoader: postRotation quaternion is inverted before multiply
+		q = q.multiply(new Quat(-qPost.x, -qPost.y, -qPost.z, qPost.w));
+	}
+	return q.normalize();
+}
+
+/** LclRotation only — matches parent-local `R` keys from {@link AnimationParser} / {@link generateQuaternions}. */
+export function bindQuatFromRestPoseLclOnly(rest: BoneRestPose | null): Quat | null {
+	if (!rest?.lclRotation || rest.lclRotation.length < 3) return null;
+	const t = eulerToQuaternionByOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], 'ZXY');
+	return new Quat(t.x, t.y, t.z, t.w).normalize();
+}
+
+/**
+ * FBX joint rest **Pre·Lcl** (ZXY eulers, radians) — Mixamo limbs often have ~0 Lcl + large Pre; sandwich `q_a` must include Pre or it reads as identity vs calibrated T-pose table.
+ * `R` curves still animate Lcl only in our parser; this does not change key sampling, only the per-clip bind quaternion used for Mixamo→MMD sandwich.
+ */
+export function bindQuatFromRestPosePreLcl(rest: BoneRestPose | null): Quat | null {
+	if (!rest) return null;
+	const e = (x: number, y: number, z: number) => eulerToQuaternionByOrder(x, y, z, 'ZXY');
+	const toQ = (t: { x: number; y: number; z: number; w: number }) => new Quat(t.x, t.y, t.z, t.w);
+	if (rest.lclRotation && rest.lclRotation.length >= 3) {
+		let q = toQ(e(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2]));
+		if (rest.preRotation && rest.preRotation.length >= 3) {
+			q = eulerToQuatIntrinsicZYX(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2]).multiply(q);
+		}
+		return q.normalize();
+	}
+	if (rest.preRotation && rest.preRotation.length >= 3) {
+		return eulerToQuatIntrinsicZYX(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2]);
+	}
+	return null;
 }
 
 // Quaternion slerp (spherical linear interpolation)

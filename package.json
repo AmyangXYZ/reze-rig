@@ -2,6 +2,9 @@
   "name": "beside.love",
   "version": "0.1.0",
   "private": true,
+  "imports": {
+    "reze-engine": "./node_modules/reze-engine/dist/index.js"
+  },
   "scripts": {
     "dev": "next dev --port 4002",
     "build": "next build",
@@ -36,6 +39,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.25.12",
     "eslint": "^9",
     "eslint-config-next": "16.1.4",
     "tailwindcss": "^4",
