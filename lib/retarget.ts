@@ -367,6 +367,14 @@ export interface RetargetOptions {
 	 * while X/Z stay at the origin.
 	 */
 	inPlace?: boolean;
+	/**
+	 * Export foot-IK target tracks (左足ＩＫ/右足ＩＫ) from the FK ankle trajectory
+	 * instead of disabling the chains. Deltas are bind-relative, so at contact the
+	 * target lands at the TARGET model's own ankle bind height — heeled models
+	 * ground correctly without per-model offsets. Toe IK stays off (foot pitch
+	 * keeps coming from the FK 足首 rotation).
+	 */
+	footIK?: boolean;
 }
 
 function calculateDuration(clip: AnimationClip): number {
@@ -513,9 +521,15 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		nameMap: BONE_MAP,
 		targetPositions,
 		positionScale: DEFAULT_POSITION_SCALE, // patched below once bind FK exists
-		translationExports: positionTrackByCanonical.has('Hips')
-			? [{ srcBone: 'Hips', mmdBone: 'センター' }]
-			: [],
+		translationExports: [
+			...(positionTrackByCanonical.has('Hips') ? [{ srcBone: 'Hips', mmdBone: 'センター' }] : []),
+			...(opts?.footIK
+				? [
+					{ srcBone: 'LeftFoot', mmdBone: '左足ＩＫ' },
+					{ srcBone: 'RightFoot', mmdBone: '右足ＩＫ' },
+				]
+				: []),
+		],
 	});
 
 	// Auto scale: ratio of the two skeletons' hip heights at bind. Works for cm,
@@ -535,9 +549,23 @@ function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): Retargete
 	const { core, trackByCanonical, duration } = buildFbxCore(clip, opts);
 	reportOnce(clip, core, trackByCanonical);
 	const out = retargetCoreClip(core, clip.name);
-	const positionTracks = opts?.inPlace
-		? out.positionTracks.map((t) => ({ ...t, positions: t.positions.map((p) => new Vec3(0, p.y, 0)) }))
-		: out.positionTracks;
+	// In place: センター loses its horizontal path outright; every other exported
+	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
+	// oscillating around the body instead of running off without it.
+	let positionTracks = out.positionTracks;
+	if (opts?.inPlace) {
+		const center = out.positionTracks.find((t) => t.name === 'センター');
+		positionTracks = out.positionTracks.map((t) => {
+			if (t.name === 'センター') return { ...t, positions: t.positions.map((p) => new Vec3(0, p.y, 0)) };
+			return {
+				...t,
+				positions: t.positions.map((p, i) => {
+					const c = center?.positions[i];
+					return new Vec3(p.x - (c?.x ?? 0), p.y, p.z - (c?.z ?? 0));
+				}),
+			};
+		});
+	}
 	return { ...out, positionTracks, duration };
 }
 

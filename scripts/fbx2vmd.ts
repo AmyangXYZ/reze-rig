@@ -18,11 +18,38 @@ import { basename, join } from "node:path"
 import { parseFbxToAnimationClips } from "../lib/fbx"
 import { buildBindReferenceFromClip, retargetClips } from "../lib/retarget"
 import { toEngineClip } from "../lib/engine-clip"
-// Not in the engine's public exports yet — reach into dist (pure module, no GPU).
-import { VMDWriter } from "../node_modules/reze-engine/dist/vmd-writer.js"
+import { VMDWriter, PmxLoader } from "reze-engine"
 
 interface MmdSkeletonDump {
   bones: { name: string; worldPosition: number[] }[]
+}
+
+/** Bind-pose world positions measured from the actual target PMX — the CLI twin of the
+ *  site's live measureTargetPositions. Never a canned skeleton dump: alignment (foot
+ *  direction especially — heels!) must respect the model the VMDs will play on. */
+function measurePmxTargetPositions(pmxPath: string): Record<string, [number, number, number]> {
+  const buf = readFileSync(pmxPath)
+  const model = PmxLoader.loadFromBuffer(toArrayBuffer(buf))
+  const bones = model.getSkeleton().bones
+  const world: ([number, number, number] | null)[] = new Array(bones.length).fill(null)
+  const compute = (i: number): [number, number, number] => {
+    const cached = world[i]
+    if (cached) return cached
+    const b = bones[i]
+    const p: [number, number, number] = b.parentIndex >= 0 ? compute(b.parentIndex) : [0, 0, 0]
+    const w: [number, number, number] = [
+      p[0] + b.bindTranslation[0],
+      p[1] + b.bindTranslation[1],
+      p[2] + b.bindTranslation[2],
+    ]
+    world[i] = w
+    return w
+  }
+  const out: Record<string, [number, number, number]> = {}
+  for (let i = 0; i < bones.length; i++) {
+    if (!(bones[i].name in out)) out[bones[i].name] = compute(i)
+  }
+  return out
 }
 
 function collectFbx(path: string, out: string[]): void {
@@ -43,15 +70,21 @@ function main(): void {
   const inputs: string[] = []
   let outDir: string | null = null
   let inPlace = false
+  let footIK = false
   let bindRefPath: string | null = null
+  let targetPmxPath: string | null = null
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--out") outDir = args[++i]
     else if (args[i] === "--in-place") inPlace = true
+    else if (args[i] === "--foot-ik") footIK = true
     else if (args[i] === "--bind-ref") bindRefPath = args[++i]
+    else if (args[i] === "--target-pmx") targetPmxPath = args[++i]
     else inputs.push(args[i])
   }
   if (inputs.length === 0) {
-    console.error("usage: fbx2vmd <files-or-dirs...> [--out <dir>] [--in-place] [--bind-ref <idle.fbx>]")
+    console.error(
+      "usage: fbx2vmd <files-or-dirs...> [--out <dir>] [--target-pmx <model.pmx>] [--in-place] [--foot-ik] [--bind-ref <idle.fbx>]"
+    )
     process.exit(1)
   }
 
@@ -63,10 +96,18 @@ function main(): void {
     process.exit(1)
   }
 
-  const mmdSkel = JSON.parse(readFileSync(join(process.cwd(), "public", "mmd-skeleton.json"), "utf8")) as MmdSkeletonDump
-  const targetPositions: Record<string, [number, number, number]> = {}
-  for (const b of mmdSkel.bones) {
-    targetPositions[b.name] = [b.worldPosition[0], b.worldPosition[1], b.worldPosition[2]]
+  let targetPositions: Record<string, [number, number, number]>
+  if (targetPmxPath) {
+    targetPositions = measurePmxTargetPositions(targetPmxPath)
+    console.log(`target skeleton: measured from ${targetPmxPath}`)
+  } else {
+    // Legacy fallback; prefer --target-pmx so alignment respects the actual model.
+    const mmdSkel = JSON.parse(readFileSync(join(process.cwd(), "public", "mmd-skeleton.json"), "utf8")) as MmdSkeletonDump
+    targetPositions = {}
+    for (const b of mmdSkel.bones) {
+      targetPositions[b.name] = [b.worldPosition[0], b.worldPosition[1], b.worldPosition[2]]
+    }
+    console.log("target skeleton: public/mmd-skeleton.json (pass --target-pmx to measure the real model)")
   }
 
   const refFile = bindRefPath ?? files.find((f) => basename(f).toLowerCase() === "idle.fbx") ?? null
@@ -89,7 +130,7 @@ function main(): void {
       const clips = parseFbxToAnimationClips(toArrayBuffer(readFileSync(file)))
       if (clips.length === 0) throw new Error("no animation clips")
       if (clips.length > 1) console.warn(`${name}: ${clips.length} clips, converting the first`)
-      const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace })
+      const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace, footIK })
       const vmd = writer.write(toEngineClip(mmd))
       const outPath = join(outDir ?? join(file, ".."), `${name}.vmd`)
       writeFileSync(outPath, Buffer.from(vmd))
