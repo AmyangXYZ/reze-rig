@@ -23,6 +23,12 @@ import type { MaterialPresetMap } from "reze-engine"
 
 const DEFAULT_MODEL_KEY = "thoth"
 
+// Whether this build ships the demo model and dance (absent = on). Set
+// NEXT_PUBLIC_USE_DEFAULT_ASSETS=false to boot empty; parsed leniently, same
+// convention as reze-design. Read at build time (NEXT_PUBLIC_ inlines it).
+const NO = ["false", "0", "off", "no"]
+const USE_DEFAULT_ASSETS = !NO.includes((process.env.NEXT_PUBLIC_USE_DEFAULT_ASSETS ?? "").trim().toLowerCase())
+
 /** Fill the gaps in the engine's built-in CN name hints for the Thoth PMX
  *  (grouping mirrors reze-design's hand-authored scene doc for this model). */
 const THOTH_STYLE_OVERRIDES: MaterialPresetMap = {
@@ -165,12 +171,14 @@ export default function Home() {
         })
         engineRef.current = engine
         await engine.init()
-        const model = await engine.loadModel(
-          DEFAULT_MODEL_KEY,
-          "/models/托特/托特.pmx"
-        )
-        modelRef.current = model
-        await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
+        if (USE_DEFAULT_ASSETS) {
+          const model = await engine.loadModel(
+            DEFAULT_MODEL_KEY,
+            "/models/托特/托特.pmx"
+          )
+          modelRef.current = model
+          await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
+        }
         // Ground: teal-600 #0d9488 in linear light.
         engine.addGround({
           diffuseColor: new Vec3(0.004, 0.296, 0.246),
@@ -186,8 +194,12 @@ export default function Home() {
 
         // Measure the model's bind-pose bone positions (drives segment alignment
         // and auto translation scale). Needs a settled frame, before any clip plays.
-        await new Promise((r) => requestAnimationFrame(r))
-        targetPositionsRef.current = measureTargetPositions((n) => model.getBoneWorldPosition(n))
+        // Without default assets there is no model yet; uploads re-measure themselves.
+        if (modelRef.current) {
+          await new Promise((r) => requestAnimationFrame(r))
+          const model = modelRef.current
+          targetPositionsRef.current = measureTargetPositions((n) => model.getBoneWorldPosition(n))
+        }
 
         // Pre-load Idle.fbx as the canonical bind reference for UE-Mannequin / Unity
         // Humanoid clips. Some Unity per-pose exports (Run_Lfoot, Run_Stop_*) stash the
@@ -202,7 +214,7 @@ export default function Home() {
         }
 
         // Auto-load demo FBX file
-        await loadFBXAndPlay("/fbx/Rumba Dancing.fbx", "Rumba Dancing.vmd")
+        if (USE_DEFAULT_ASSETS) await loadFBXAndPlay("/fbx/Rumba Dancing.fbx", "Rumba Dancing.vmd")
 
         setEngineError(null)
       } catch (error) {
