@@ -1,22 +1,39 @@
-import { Quat, Vec3 } from 'reze-engine';
+import { Quat } from 'reze-engine';
 import type { AnimationClip, BoneRestPose, BoneTrack } from './fbx';
+import {
+	createCoreContext,
+	retargetCoreClip,
+	type Q4,
+	type RetargetCoreContext,
+	type RetargetedClip,
+	type RetargetSource,
+	type SourceBone,
+	type V3,
+} from './retarget-core';
 
-// ============================================================
-// Textbook skeletal retarget (rotation-based, identity target bind).
-//
-// Per source bone b with FBX `Pre` / `Post` rotations and Lcl key q:
-//   LBP_b = qPre · qLclBind · qPost⁻¹                  (parent-local rest)
-//   LP_b(t) = qPre · qLcl(t) · qPost⁻¹                 (parent-local at time t)
-//   WB_b = WB_parent · LBP_b                            (world rest, BFS)
-//   W_b(t) = W_parent(t) · LP_b(t)                      (world at t, BFS)
-//   Δworld_b(t) = W_b(t) · WB_b⁻¹                       (world delta from rest)
-//
-// MMD target bones bind = identity (the PMX is in T-pose, no per-bone bind orientation).
-// Therefore target world rotation = axisSwap(Δworld_b(t)), and the VMD parent-local key
-// is WT_parent(t)⁻¹ · WT_b(t) — propagated only through bones that exist in BONE_MAP.
-// (Source-side propagation includes a `Root` bone above Hips for Unity exports; MMD output
-// drops it because the MMD model has no equivalent.)
-// ============================================================
+/**
+ * FBX → MMD frontend for the retarget core (lib/retarget-core.ts — the
+ * algorithm and its derivation live there).
+ *
+ * This file owns what is FBX-specific:
+ *  - name canonicalization (Mixamo prefix, UE-Mannequin / Unity-Humanoid table),
+ *  - bind extraction from Pre/Post/Lcl rotations, with the bind-reference
+ *    override for Unity per-pose exports whose "rest" is a stride snapshot,
+ *  - topology from the file's real Connections hierarchy when present,
+ *    falling back to the canonical humanoid table,
+ *  - handedness: FBX is right-handed Y-up, MMD left-handed Y-up. Local
+ *    rotations convert as q → (−x, −y, z, w) and translations as (x, y, −z);
+ *    the conversion is conjugation by the Z-mirror, so converting every local
+ *    before the core is equivalent to converting composed world transforms.
+ *  - translation scale, auto-derived from the two skeletons' hip heights when
+ *    the target model's bone positions are provided.
+ */
+
+export type { RetargetedClip, RetargetedBoneTrack, RetargetedPositionTrack } from './retarget-core';
+
+/* ============================================================================
+ * Name canonicalization (profiles).
+ * ========================================================================= */
 
 /** UE / Unity Humanoid → canonical Mixamo-style bone names. */
 const UE_MANNEQUIN_TO_MIXAMO: Record<string, string> = {
@@ -75,11 +92,27 @@ const UE_MANNEQUIN_TO_MIXAMO: Record<string, string> = {
 	pinky_03_l: 'LeftHandPinky3',
 };
 
-/** Canonical Mixamo-style name → MMD/PMX bone name (target VMD output). */
+function canonicalizeBoneName(rawName: string): string {
+	const stripped = rawName.replace(/^mixamorig\d*:/i, '').trim();
+	const ueKey = stripped.toLowerCase();
+	return UE_MANNEQUIN_TO_MIXAMO[ueKey] ?? stripped;
+}
+
+/* ============================================================================
+ * Canonical → MMD map (same conventions as the validated HKX path).
+ * ========================================================================= */
+
+/**
+ * Hips carries the pelvis rotation → 下半身 (its translation exports to
+ * センター separately). Spine2 is deliberately unmapped: the world-delta
+ * cancellation folds it into shoulders/neck, matching MMD's two-spine layout.
+ */
 const BONE_MAP: Record<string, string> = {
-	Hips: 'センター',
-	Spine: '腰',
-	Spine1: '上半身',
+	Hips: '下半身',
+	// Three source spine joints onto MMD's two: the deepest (Spine2, the chest)
+	// lands on 上半身2 and Spine1 folds into it — see the same note in
+	// lib/hkx-retarget.ts. Mapping Spine1→上半身2 loses chest bend on deep bows.
+	Spine: '上半身',
 	Spine2: '上半身2',
 	Neck: '首',
 	Head: '頭',
@@ -95,10 +128,12 @@ const BONE_MAP: Record<string, string> = {
 	RightLeg: '右ひざ',
 	RightFoot: '右足首',
 	RightToeBase: '右足先EX',
+	RightToe_End: '右つま先',
 	LeftUpLeg: '左足',
 	LeftLeg: '左ひざ',
 	LeftFoot: '左足首',
 	LeftToeBase: '左足先EX',
+	LeftToe_End: '左つま先',
 	// MMD thumbs are 親指０/１/２ (the ０ is the metacarpal) — there is no 親指３.
 	RightHandThumb1: '右親指０',
 	RightHandThumb2: '右親指１',
@@ -133,11 +168,11 @@ const BONE_MAP: Record<string, string> = {
 };
 
 /**
- * Source-side hierarchy keyed by canonical name. `Root` is included so Unity exports
- * (root → pelvis) propagate the scene-root rotation into Hips world rest/animation.
- * Mixamo clips have no `root` track — Root just contributes identity.
+ * Fallback topology for clips without a Connections hierarchy (JSON dumps).
+ * `Root` is included so Unity exports (root → pelvis) propagate the scene-root
+ * rotation into Hips; Mixamo clips have no root track — it contributes identity.
  */
-const SOURCE_PARENT: Record<string, string | null> = {
+const FALLBACK_PARENT: Record<string, string | null> = {
 	Root: null,
 	Hips: 'Root',
 	Spine: 'Hips',
@@ -157,10 +192,12 @@ const SOURCE_PARENT: Record<string, string | null> = {
 	LeftLeg: 'LeftUpLeg',
 	LeftFoot: 'LeftLeg',
 	LeftToeBase: 'LeftFoot',
+	LeftToe_End: 'LeftToeBase',
 	RightUpLeg: 'Hips',
 	RightLeg: 'RightUpLeg',
 	RightFoot: 'RightLeg',
 	RightToeBase: 'RightFoot',
+	RightToe_End: 'RightToeBase',
 	LeftHandThumb1: 'LeftHand',  LeftHandThumb2: 'LeftHandThumb1',  LeftHandThumb3: 'LeftHandThumb2',
 	LeftHandIndex1: 'LeftHand',  LeftHandIndex2: 'LeftHandIndex1',  LeftHandIndex3: 'LeftHandIndex2',
 	LeftHandMiddle1: 'LeftHand', LeftHandMiddle2: 'LeftHandMiddle1', LeftHandMiddle3: 'LeftHandMiddle2',
@@ -173,45 +210,17 @@ const SOURCE_PARENT: Record<string, string | null> = {
 	RightHandPinky1: 'RightHand',  RightHandPinky2: 'RightHandPinky1',  RightHandPinky3: 'RightHandPinky2',
 };
 
-// ============================================================
-// Output types (consumed by lib/vmd-writer.ts)
-// ============================================================
+/** Legacy Mixamo-in-cm scale, used only when the target model isn't measurable. */
+const DEFAULT_POSITION_SCALE = 1 / 12.5;
 
-export interface RetargetedBoneTrack {
-	name: string;
-	originalName: string;
-	times: number[];
-	quats: Quat[];
-}
+const OUTPUT_FPS = 30;
 
-export interface RetargetedPositionTrack {
-	name: string;
-	originalName: string;
-	times: number[];
-	positions: Vec3[];
-}
-
-export interface RetargetedClip {
-	name: string;
-	duration: number;
-	fps: number;
-	boneTracks: RetargetedBoneTrack[];
-	positionTracks: RetargetedPositionTrack[];
-}
-
-export const POSITION_SCALE = 1 / 12.5;
-export const POSITION_OFFSET_Y = -8.3;
-
-// ============================================================
-// Quaternion helpers
-// ============================================================
+/* ============================================================================
+ * FBX rotation plumbing (Pre/Post/Lcl → parent-local quats).
+ * ========================================================================= */
 
 function quatIdentity(): Quat {
 	return new Quat(0, 0, 0, 1);
-}
-
-function quatInverse(q: Quat): Quat {
-	return new Quat(-q.x, -q.y, -q.z, q.w);
 }
 
 function eulerToQuatZXY(x: number, y: number, z: number): Quat {
@@ -246,7 +255,7 @@ function preQuat(rest: BoneRestPose | null): Quat {
 function postQuatInv(rest: BoneRestPose | null): Quat {
 	if (!rest?.postRotation) return quatIdentity();
 	const q = eulerToQuatIntrinsicZYX(rest.postRotation[0], rest.postRotation[1], rest.postRotation[2]);
-	return quatInverse(q);
+	return new Quat(-q.x, -q.y, -q.z, q.w);
 }
 
 function lclBindQuat(rest: BoneRestPose | null): Quat {
@@ -259,165 +268,18 @@ function applyPrePost(q: Quat, pre: Quat, postInv: Quat): Quat {
 	return pre.clone().multiply(q).multiply(postInv);
 }
 
-/**
- * Map FBX-frame world quaternion → engine MMD-frame quaternion. Empirically `(x, y, -z, -w)`
- * (mirrors X & Y axes; equivalent to a right-handed → left-handed Y-up swap on rotation sign).
- * Same swap the legacy retarget used; left intact for parity with the working Mixamo path.
- */
-function fbxWorldToMmd(q: Quat): Quat {
-	return new Quat(q.x, q.y, -q.z, -q.w);
+/** Right-handed Y-up → left-handed Y-up (conjugation by the Z-mirror). */
+function lhQ4(q: Quat): Q4 {
+	return [-q.x, -q.y, q.z, q.w];
 }
 
-// ---------- A-pose target-bind compensation ----------
-// MMD model mesh is skinned in A-pose: at "bone identity" the arms display rotated ~35°
-// down. To make source's bind pose display as itself on the MMD mesh, we post-multiply each
-// arm-chain bone's MMD-frame world rotation by a per-side BIAS — the rotation that takes the
-// MMD mesh's natural A-pose arm direction to the source's actual bind arm direction. With
-// cross-bone parent propagation enabled (parent_target_world subtracted when computing each
-// child's local), the parent's bias is automatically undone in the child's local rotation —
-// no manual "undo" pre-multiply needed. The bias becomes identity when the source rig is
-// already in A-pose.
-const ARM_ANGLE_RAD = (35 * Math.PI) / 180;
-
-/** MMD mesh A-pose direction (in MMD frame: +X right, +Y up, +Z forward). */
-const MMD_LEFT_ARM_DIR_AT_BIND: [number, number, number] = [Math.cos(ARM_ANGLE_RAD), -Math.sin(ARM_ANGLE_RAD), 0];
-const MMD_RIGHT_ARM_DIR_AT_BIND: [number, number, number] = [-Math.cos(ARM_ANGLE_RAD), -Math.sin(ARM_ANGLE_RAD), 0];
-
-const LEFT_ARM_CHAIN = [
-	'LeftArm', 'LeftForeArm', 'LeftHand',
-	'LeftHandThumb1', 'LeftHandThumb2', 'LeftHandThumb3',
-	'LeftHandIndex1', 'LeftHandIndex2', 'LeftHandIndex3',
-	'LeftHandMiddle1', 'LeftHandMiddle2', 'LeftHandMiddle3',
-	'LeftHandRing1', 'LeftHandRing2', 'LeftHandRing3',
-	'LeftHandPinky1', 'LeftHandPinky2', 'LeftHandPinky3',
-];
-const RIGHT_ARM_CHAIN = [
-	'RightArm', 'RightForeArm', 'RightHand',
-	'RightHandThumb1', 'RightHandThumb2', 'RightHandThumb3',
-	'RightHandIndex1', 'RightHandIndex2', 'RightHandIndex3',
-	'RightHandMiddle1', 'RightHandMiddle2', 'RightHandMiddle3',
-	'RightHandRing1', 'RightHandRing2', 'RightHandRing3',
-	'RightHandPinky1', 'RightHandPinky2', 'RightHandPinky3',
-];
-
-function rotateVec3ByQuat(v: [number, number, number], q: Quat): [number, number, number] {
-	const px = v[0], py = v[1], pz = v[2];
-	const qx = q.x, qy = q.y, qz = q.z, qw = q.w;
-	const tx = 2 * (qy * pz - qz * py);
-	const ty = 2 * (qz * px - qx * pz);
-	const tz = 2 * (qx * py - qy * px);
-	return [
-		px + qw * tx + (qy * tz - qz * ty),
-		py + qw * ty + (qz * tx - qx * tz),
-		pz + qw * tz + (qx * ty - qy * tx),
-	];
+function lhV3(v: [number, number, number] | null): V3 {
+	return v ? [v[0], v[1], -v[2]] : [0, 0, 0];
 }
 
-/** Shortest-arc rotation that takes unit vector `from` to unit vector `to`. */
-function quatFromVec3(from: [number, number, number], to: [number, number, number]): Quat {
-	const fl = Math.hypot(from[0], from[1], from[2]) || 1;
-	const tl = Math.hypot(to[0], to[1], to[2]) || 1;
-	const fx = from[0] / fl, fy = from[1] / fl, fz = from[2] / fl;
-	const tx = to[0] / tl, ty = to[1] / tl, tz = to[2] / tl;
-	const dot = fx * tx + fy * ty + fz * tz;
-	if (dot >= 0.999999) return quatIdentity();
-	if (dot <= -0.999999) {
-		// Antiparallel: 180° rotation around any perpendicular axis.
-		const perp: [number, number, number] = Math.abs(fx) < 0.9 ? [1, 0, 0] : [0, 1, 0];
-		const ax = fy * perp[2] - fz * perp[1];
-		const ay = fz * perp[0] - fx * perp[2];
-		const az = fx * perp[1] - fy * perp[0];
-		const al = Math.hypot(ax, ay, az) || 1;
-		return new Quat(ax / al, ay / al, az / al, 0);
-	}
-	const cx = fy * tz - fz * ty;
-	const cy = fz * tx - fx * tz;
-	const cz = fx * ty - fy * tx;
-	return new Quat(cx, cy, cz, 1 + dot).normalize();
-}
-
-/** Pick the dominant axis of `v` (returned with sign) — used to detect bone-axis from child translation. */
-function dominantAxis(v: [number, number, number]): [number, number, number] {
-	const ax = Math.abs(v[0]), ay = Math.abs(v[1]), az = Math.abs(v[2]);
-	if (ax >= ay && ax >= az) return [Math.sign(v[0]) || 1, 0, 0];
-	if (ay >= az) return [0, Math.sign(v[1]) || 1, 0];
-	return [0, 0, Math.sign(v[2]) || 1];
-}
-
-/** Mirror a vector across the FBX→MMD axis swap (Z negation), matching `fbxWorldToMmd` for vectors. */
-function fbxVecToMmd(v: [number, number, number]): [number, number, number] {
-	return [v[0], v[1], -v[2]];
-}
-
-// ============================================================
-// Bone name canonicalization
-// ============================================================
-
-function canonicalizeBoneName(rawName: string): string {
-	const stripped = rawName.replace(/^mixamorig:/i, '').trim();
-	const ueKey = stripped.toLowerCase();
-	return UE_MANNEQUIN_TO_MIXAMO[ueKey] ?? stripped;
-}
-
-// ============================================================
-// Per-clip rest-pose resolution
-// ============================================================
-
-interface BoneInfo {
-	rest: BoneRestPose | null;
-	pre: Quat;
-	postInv: Quat;
-	lclBind: Quat;
-	/** Parent-local rest orientation: qPre · qLclBind · qPost⁻¹. */
-	parentLocalBind: Quat;
-	/** Cumulative world rest orientation in source FBX frame. */
-	worldBind: Quat;
-}
-
-function buildBoneInfoMap(clip: AnimationClip, bindRef?: Map<string, BoneRestPose> | null): Map<string, BoneInfo> {
-	const restByCanonical = new Map<string, BoneRestPose | null>();
-	for (const t of clip.tracks) {
-		const c = canonicalizeBoneName(t.name);
-		if (restByCanonical.has(c)) continue;
-		// Prefer bind-reference rest when provided. Per-clip rest pose in some Unity/UE
-		// exports (e.g., mid-cycle "stride pose" clips) is a snapshot of frame 0 rather
-		// than the canonical T/A bind, which makes the world-delta computation reference
-		// the wrong baseline. The bind reference (extracted from a known-good clip such
-		// as Idle.fbx) gives the actual canonical bind for the rig.
-		const ref = bindRef?.get(c);
-		restByCanonical.set(c, ref ?? t.restPose ?? null);
-	}
-
-	// BFS topological order: parent before child.
-	const order: string[] = [];
-	const seen = new Set<string>();
-	const visit = (b: string): void => {
-		if (seen.has(b)) return;
-		const p = SOURCE_PARENT[b];
-		if (p) visit(p);
-		seen.add(b);
-		order.push(b);
-	};
-	for (const b of Object.keys(SOURCE_PARENT)) visit(b);
-
-	const out = new Map<string, BoneInfo>();
-	for (const b of order) {
-		const rest = restByCanonical.get(b) ?? null;
-		const pre = preQuat(rest);
-		const postInv = postQuatInv(rest);
-		const lclBind = lclBindQuat(rest);
-		const parentLocalBind = applyPrePost(lclBind, pre, postInv);
-		const parent = SOURCE_PARENT[b];
-		const parentWB = parent ? out.get(parent)?.worldBind ?? quatIdentity() : quatIdentity();
-		const worldBind = parentWB.clone().multiply(parentLocalBind);
-		out.set(b, { rest, pre, postInv, lclBind, parentLocalBind, worldBind });
-	}
-	return out;
-}
-
-// ============================================================
-// Sampling
-// ============================================================
+/* ============================================================================
+ * Track sampling (slerp).
+ * ========================================================================= */
 
 function sampleBoneTrack(track: BoneTrack, time: number): Quat {
 	if (track.times.length === 0) return quatIdentity();
@@ -461,94 +323,22 @@ function sampleBoneTrack(track: BoneTrack, time: number): Quat {
 	).normalize();
 }
 
-// ============================================================
-// Retarget
-// ============================================================
-
-function calculateDuration(clip: AnimationClip): number {
-	if (clip.duration > 0) return clip.duration;
-	let max = 0;
-	for (const t of clip.tracks) for (const tt of t.times) if (tt > max) max = tt;
-	for (const p of clip.positionTracks ?? []) for (const tt of p.times) if (tt > max) max = tt;
-	return max;
+function samplePositions(times: number[], positions: [number, number, number][], time: number): [number, number, number] {
+	if (times.length === 0) return [0, 0, 0];
+	const idx = times.findIndex(t => t >= time);
+	if (idx === -1) return positions[positions.length - 1];
+	if (idx === 0 || times[idx] === time) return positions[idx];
+	const t0 = times[idx - 1];
+	const t1 = times[idx];
+	const u = (time - t0) / (t1 - t0);
+	const p0 = positions[idx - 1];
+	const p1 = positions[idx];
+	return [p0[0] + (p1[0] - p0[0]) * u, p0[1] + (p1[1] - p0[1]) * u, p0[2] + (p1[2] - p0[2]) * u];
 }
 
-const dumpedClips = new Set<string>();
-
-function dumpWorldBindOnce(clipName: string, info: Map<string, BoneInfo>): void {
-	if (dumpedClips.has(clipName)) return;
-	dumpedClips.add(clipName);
-	const fmt = (q: Quat): [number, number, number, number] =>
-		[Number(q.x.toFixed(5)), Number(q.y.toFixed(5)), Number(q.z.toFixed(5)), Number(q.w.toFixed(5))];
-	const wb: Record<string, [number, number, number, number]> = {};
-	const lbp: Record<string, [number, number, number, number]> = {};
-	const lcl: Record<string, [number, number, number, number]> = {};
-	for (const b of ['Root', ...Object.keys(BONE_MAP)]) {
-		const i = info.get(b);
-		if (!i) continue;
-		wb[b] = fmt(i.worldBind);
-		lbp[b] = fmt(i.parentLocalBind);
-		lcl[b] = fmt(i.lclBind);
-	}
-	console.log(`[retarget] "${clipName}" worldBind:`, wb);
-	console.log(`[retarget] "${clipName}" parentLocalBind:`, lbp);
-	console.log(`[retarget] "${clipName}" lclBind:`, lcl);
-}
-
-/**
- * Detect the rig's bone-forward axis once per clip — Mixamo uses bone-Y, UE-Mannequin
- * uses bone-X. We probe well-known limb children whose `lclTranslation` (in the parent's
- * local frame) is the bone's forward direction, falling back to bone-Y if nothing usable
- * is available. Mixamo's exporter writes `null` rest pose for any joint whose `lclRotation`
- * is exactly zero — including `RightForeArm`, `RightLeg`, etc. — so per-bone detection
- * misses; using a rig-wide default keeps both arms in sync.
- */
-function detectLimbAxis(info: Map<string, BoneInfo>): [number, number, number] {
-	const probes = [
-		'LeftForeArm', 'RightForeArm', 'LeftArm', 'RightArm',
-		'LeftLeg', 'RightLeg', 'LeftFoot', 'RightFoot',
-		'Spine1', 'Spine2', 'Spine',
-	];
-	for (const c of probes) {
-		const t = info.get(c)?.rest?.lclTranslation;
-		if (!t) continue;
-		if (Math.hypot(t[0], t[1], t[2]) < 0.5) continue;
-		return dominantAxis(t);
-	}
-	return [0, 1, 0];
-}
-
-/**
- * Calibrate the per-side A-pose bias from the source rig's bind pose. We take the
- * rig-wide bone-forward axis through the arm bone's `worldBind` to get the arm's bind
- * direction in source world, map it to the MMD frame, and return the rotation that
- * takes the MMD mesh's A-pose arm direction onto that source direction. Mixamo (T-pose)
- * → ~35° around Z; UE-Mannequin / Unity Humanoid (A-pose) → ~identity.
- */
-function computeArmBias(
-	armBone: string,
-	tipAxis: [number, number, number],
-	mmdMeshDir: [number, number, number],
-	info: Map<string, BoneInfo>,
-): Quat {
-	const armInfo = info.get(armBone);
-	if (!armInfo) return quatIdentity();
-	const srcDir = rotateVec3ByQuat(tipAxis, armInfo.worldBind);
-	const srcDirMmd = fbxVecToMmd(srcDir);
-	return quatFromVec3(mmdMeshDir, srcDirMmd);
-}
-
-export interface RetargetOptions {
-	/**
-	 * Override rest poses keyed by canonical bone name. When provided, the retarget
-	 * uses these instead of each clip's own track `restPose`. Some Unity/UE per-pose
-	 * exports (e.g., mid-cycle "stride pose" clips) embed the first animation frame
-	 * as the rest pose, which makes "delta from rest" reference the wrong baseline.
-	 * Building this map from a known-good clip (an idle, or the rig's bind/T-pose
-	 * file) gives the retarget a stable canonical bind to subtract against.
-	 */
-	bindReference?: Map<string, BoneRestPose> | null;
-}
+/* ============================================================================
+ * Bind-reference support (Unity per-pose exports).
+ * ========================================================================= */
 
 /**
  * Whether a clip's bones look like UE-Mannequin / Unity Humanoid (vs Mixamo). We probe
@@ -562,7 +352,7 @@ const UE_DISTINCTIVE_NAMES = new Set([
 ]);
 export function isUEMannequinClip(clip: AnimationClip): boolean {
 	for (const t of clip.tracks) {
-		const stripped = t.name.replace(/^mixamorig:/i, '').trim().toLowerCase();
+		const stripped = t.name.replace(/^mixamorig\d*:/i, '').trim().toLowerCase();
 		if (UE_DISTINCTIVE_NAMES.has(stripped)) return true;
 	}
 	return false;
@@ -579,153 +369,221 @@ export function buildBindReferenceFromClip(clip: AnimationClip): Map<string, Bon
 	return map;
 }
 
+/* ============================================================================
+ * Retarget.
+ * ========================================================================= */
+
+/**
+ * Measure the loaded model's bind-pose world positions for every MMD bone the
+ * retarget can output. Call once after the model loads (bind pose, before any
+ * animation), with e.g. `(n) => model.getBoneWorldPosition(n)`.
+ */
+export function measureTargetPositions(
+	getPos: (mmdName: string) => { x: number; y: number; z: number } | null,
+): Record<string, V3> {
+	const out: Record<string, V3> = {};
+	for (const mmdName of new Set(Object.values(BONE_MAP))) {
+		try {
+			const p = getPos(mmdName);
+			if (p) out[mmdName] = [p.x, p.y, p.z];
+		} catch {
+			// bone missing on this model — that bone falls back to plain delta
+		}
+	}
+	return out;
+}
+
+export interface RetargetOptions {
+	/**
+	 * Override rest poses keyed by canonical bone name. Some Unity/UE per-pose
+	 * exports (e.g., mid-cycle "stride pose" clips) embed the first animation
+	 * frame as the rest pose, which makes "delta from rest" reference the wrong
+	 * baseline. Build this from a known-good clip (an idle, or the rig's
+	 * bind/T-pose file). Applied only when the clip looks UE/Unity-shaped.
+	 */
+	bindReference?: Map<string, BoneRestPose> | null;
+	/**
+	 * The target MMD model's bind-pose world positions keyed by MMD bone name
+	 * (PMX units), measured from the loaded model. Enables absolute segment
+	 * alignment — without it every bone falls back to plain world delta and the
+	 * pose inherits the bind mismatch — and auto-derives the translation scale
+	 * from the two skeletons' hip heights.
+	 */
+	targetPositions?: Record<string, V3> | null;
+}
+
+function calculateDuration(clip: AnimationClip): number {
+	if (clip.duration > 0) return clip.duration;
+	let max = 0;
+	for (const t of clip.tracks) for (const tt of t.times) if (tt > max) max = tt;
+	for (const p of clip.positionTracks ?? []) for (const tt of p.times) if (tt > max) max = tt;
+	return max;
+}
+
+interface FbxSourceBone extends SourceBone {
+	track: BoneTrack | null;
+	pre: Quat;
+	postInv: Quat;
+	/** Position track (canonical Hips), converted lazily during sampling. */
+	posTimes: number[] | null;
+	posValues: [number, number, number][] | null;
+}
+
+const reportedClips = new Set<string>();
+
 export function retargetClips(clips: AnimationClip[], opts?: RetargetOptions): RetargetedClip[] {
 	return clips.map(c => retargetOneClip(c, opts));
 }
 
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
 	const duration = calculateDuration(clip);
+	const numFrames = Math.max(2, Math.round(duration * OUTPUT_FPS) + 1);
+
 	// Apply the bind reference only when it actually matches the rig — using a UE
 	// reference on a Mixamo clip (or vice versa) would corrupt the bind because the
 	// two encode bind orientation differently (Mixamo: Pre/Post + identity Lcl;
 	// UE: large Lcl, no Pre/Post).
-	const useBindRef = opts?.bindReference && isUEMannequinClip(clip) ? opts.bindReference : null;
-	const info = buildBoneInfoMap(clip, useBindRef);
-	dumpWorldBindOnce(clip.name, info);
+	const bindRef = opts?.bindReference && isUEMannequinClip(clip) ? opts.bindReference : null;
 
-	// First track per canonical name (raw FBX may have e.g. mixamorig:Hips and a duplicate model node).
-	const animByCanonical = new Map<string, BoneTrack>();
+	// First track per canonical name (raw FBX may have e.g. mixamorig:Hips and a
+	// duplicate model node).
+	const trackByCanonical = new Map<string, BoneTrack>();
 	for (const t of clip.tracks) {
 		const c = canonicalizeBoneName(t.name);
-		if (SOURCE_PARENT[c] !== undefined && !animByCanonical.has(c)) {
-			animByCanonical.set(c, t);
-		}
+		if (!trackByCanonical.has(c)) trackByCanonical.set(c, t);
 	}
 
-	// Per-side arm bias, derived from the source rig's bind. Maps the MMD mesh's
-	// natural A-pose arm direction onto the source's actual bind arm direction so the
-	// source's rest pose displays as itself on the A-pose-skinned MMD mesh. T-pose source
-	// → ~35° around Z; A-pose source → ~identity. We use a rig-wide bone-axis detection
-	// because Mixamo's exporter omits rest data for zero-rotation joints (e.g. RightForeArm).
-	const limbAxis = detectLimbAxis(info);
-	const armBiasL = computeArmBias('LeftArm', limbAxis, MMD_LEFT_ARM_DIR_AT_BIND, info);
-	const armBiasR = computeArmBias('RightArm', limbAxis, MMD_RIGHT_ARM_DIR_AT_BIND, info);
-	const MMD_BIND_BIAS: Record<string, Quat> = {};
-	for (const b of LEFT_ARM_CHAIN) MMD_BIND_BIAS[b] = armBiasL;
-	for (const b of RIGHT_ARM_CHAIN) MMD_BIND_BIAS[b] = armBiasR;
-
-	// MMD parent chain: same as SOURCE_PARENT minus the synthetic Root link above Hips.
-	const mmdParentOf = (b: string): string | null => {
-		const p = SOURCE_PARENT[b];
-		return p && p !== 'Root' ? p : null;
-	};
-
-	// Sample source world rotation at any time t by walking the canonical source chain.
-	// Memoized per (bone, time) to keep recursion linear.
-	const srcWorldCache = new Map<string, Quat>();
-	const srcWorldAt = (b: string, t: number): Quat => {
-		const key = b + '@' + t;
-		const cached = srcWorldCache.get(key);
-		if (cached) return cached.clone();
-		const parent = SOURCE_PARENT[b] ?? null;
-		const parentW = parent ? srcWorldAt(parent, t) : quatIdentity();
-		const bInfo = info.get(b);
-		if (!bInfo) {
-			srcWorldCache.set(key, parentW.clone());
-			return parentW;
-		}
-		const track = animByCanonical.get(b);
-		const lcl = track ? sampleBoneTrack(track, t) : bInfo.lclBind.clone();
-		const lp = applyPrePost(lcl, bInfo.pre, bInfo.postInv);
-		const w = parentW.clone().multiply(lp);
-		srcWorldCache.set(key, w.clone());
-		return w;
-	};
-
-	// Target (MMD-frame) world rotation of canonical bone b at time t:
-	//   axisSwap(WS(t) · WB⁻¹) · BIAS[b]
-	const tgtWorldCache = new Map<string, Quat>();
-	const tgtWorldAt = (b: string, t: number): Quat => {
-		const key = b + '@' + t;
-		const cached = tgtWorldCache.get(key);
-		if (cached) return cached.clone();
-		const ws = srcWorldAt(b, t);
-		const bInfo = info.get(b);
-		if (!bInfo) {
-			tgtWorldCache.set(key, ws.clone());
-			return ws;
-		}
-		const dW = ws.clone().multiply(quatInverse(bInfo.worldBind));
-		let q = fbxWorldToMmd(dW);
-		const bias = MMD_BIND_BIAS[b];
-		if (bias) q = q.multiply(bias);
-		tgtWorldCache.set(key, q.clone());
-		return q;
-	};
-
-	const outBoneTracks: RetargetedBoneTrack[] = [];
-
-	for (const b of Object.keys(BONE_MAP)) {
-		const track = animByCanonical.get(b);
-		if (!track) continue;
-
-		// Cross-bone propagation: each MMD bone's local = parent_target_world(t)⁻¹ · target_world(t).
-		// This subtracts the parent's accumulated rotation (including bias) so the runtime engine's
-		// parent_runtime · child_local recomposition equals the desired source world delta.
-		const parentB = mmdParentOf(b);
-		const quats: Quat[] = track.times.map((t) => {
-			const tgtW = tgtWorldAt(b, t);
-			const parentW = parentB ? tgtWorldAt(parentB, t) : quatIdentity();
-			return quatInverse(parentW).multiply(tgtW);
-		});
-
-		outBoneTracks.push({
-			name: BONE_MAP[b],
-			originalName: track.original_name,
-			times: track.times.slice(),
-			quats,
-		});
-	}
-
-	// Position track: only Hips (→ センター). Source FBX gives parent-local position; rotate
-	// by source parent's world rotation at sample time so VMD receives world-space offset.
-	const positionTracks: RetargetedPositionTrack[] = [];
-	const hipsPos = (clip.positionTracks ?? []).find(p => canonicalizeBoneName(p.name) === 'Hips');
-	if (hipsPos) {
-		const hipsParent = SOURCE_PARENT['Hips'];
-		const parentInfo = hipsParent ? info.get(hipsParent) ?? null : null;
-		const parentTrack = hipsParent ? animByCanonical.get(hipsParent) ?? null : null;
-
-		const positions: Vec3[] = [];
-		for (let i = 0; i < hipsPos.times.length; i++) {
-			const time = hipsPos.times[i];
-			let parentW: Quat = quatIdentity();
-			if (parentInfo) {
-				const rawLcl = parentTrack ? sampleBoneTrack(parentTrack, time) : parentInfo.lclBind.clone();
-				const lp = applyPrePost(rawLcl, parentInfo.pre, parentInfo.postInv);
-				parentW = lp; // Root has no parent → world = local.
+	// Topology: the file's real Connections hierarchy when present (walk raw-name
+	// parents to the nearest tracked bone), else the canonical humanoid table.
+	const parentOfCanonical = (c: string, rawName: string): string | null => {
+		if (clip.hierarchy && clip.hierarchy.size > 0) {
+			let p = clip.hierarchy.get(rawName)?.parent ?? null;
+			while (p) {
+				const pc = canonicalizeBoneName(p);
+				if (trackByCanonical.has(pc) && pc !== c) return pc;
+				p = clip.hierarchy.get(p)?.parent ?? null;
 			}
-			const local = hipsPos.positions[i];
-			const worldFbx = rotateVec3ByQuat(local, parentW);
-			positions.push(new Vec3(
-				worldFbx[0] * POSITION_SCALE,
-				worldFbx[1] * POSITION_SCALE + POSITION_OFFSET_Y,
-				-worldFbx[2] * POSITION_SCALE,
-			));
+			return null;
 		}
-		positionTracks.push({
-			name: BONE_MAP['Hips'],
-			originalName: hipsPos.original_name,
-			times: hipsPos.times,
-			positions,
+		const p = FALLBACK_PARENT[c];
+		return p !== undefined ? p : null;
+	};
+
+	// Topologically ordered bone list (parents before children).
+	const order: string[] = [];
+	const seen = new Set<string>();
+	const parentCache = new Map<string, string | null>();
+	const visit = (c: string): void => {
+		if (seen.has(c)) return;
+		seen.add(c);
+		const track = trackByCanonical.get(c);
+		const parent = track ? parentOfCanonical(c, track.name) : FALLBACK_PARENT[c] ?? null;
+		parentCache.set(c, parent);
+		if (parent && (trackByCanonical.has(parent) || FALLBACK_PARENT[parent] !== undefined)) visit(parent);
+		order.push(c);
+	};
+	// Seed with every canonical name we can see (tracked bones + fallback chain roots).
+	for (const c of trackByCanonical.keys()) visit(c);
+	// Re-order so parents precede children (visit() appends after recursing into
+	// the parent, but a child seeded first still lands after its parent).
+	order.sort((a, b) => depthOf(a, parentCache) - depthOf(b, parentCache));
+
+	const positionTrackByCanonical = new Map<string, { times: number[]; positions: [number, number, number][] }>();
+	for (const p of clip.positionTracks ?? []) {
+		const c = canonicalizeBoneName(p.name);
+		if (!positionTrackByCanonical.has(c)) positionTrackByCanonical.set(c, { times: p.times, positions: p.positions });
+	}
+
+	const bones: FbxSourceBone[] = [];
+	const idxByCanonical = new Map<string, number>();
+	for (const c of order) {
+		const track = trackByCanonical.get(c) ?? null;
+		const rest = bindRef?.get(c) ?? track?.restPose ?? null;
+		const pre = preQuat(rest);
+		const postInv = postQuatInv(rest);
+		const bindLocal = applyPrePost(lclBindQuat(rest), pre, postInv);
+		const parent = parentCache.get(c) ?? null;
+		const pos = positionTrackByCanonical.get(c) ?? null;
+		// Mixamo omits rest translations for zero-rotation joints — including Hips.
+		// A zero bind position would make the translation export's "delta from
+		// bind" equal the ABSOLUTE world position (~100cm × scale: the model
+		// launches upward and sideways). For a bone with a position track, its
+		// first sample is the baseline: the clip starts at the model's own spot.
+		const bindT = rest?.lclTranslation ?? pos?.positions[0] ?? null;
+		idxByCanonical.set(c, bones.length);
+		bones.push({
+			name: c,
+			parentIndex: parent !== null ? idxByCanonical.get(parent) ?? -1 : -1,
+			bindLocalRot: lhQ4(bindLocal),
+			bindLocalPos: lhV3(bindT),
+			track,
+			pre,
+			postInv,
+			posTimes: pos?.times ?? null,
+			posValues: pos?.positions ?? null,
 		});
 	}
 
-	return {
-		name: clip.name,
-		duration,
-		fps: 30,
-		boneTracks: outBoneTracks,
-		positionTracks,
+	const source: RetargetSource = {
+		bones,
+		numFrames,
+		fps: OUTPUT_FPS,
+		sample(boneIdx, frame) {
+			const b = bones[boneIdx];
+			if (!b.track && !b.posTimes) return null;
+			const time = frame / OUTPUT_FPS;
+			const rot = b.track
+				? lhQ4(applyPrePost(sampleBoneTrack(b.track, time), b.pre, b.postInv))
+				: b.bindLocalRot;
+			const pos = b.posTimes && b.posValues
+				? lhV3(samplePositions(b.posTimes, b.posValues, time))
+				: b.bindLocalPos;
+			return { rot, pos };
+		},
 	};
+
+	const targetPositions = opts?.targetPositions ?? undefined;
+
+	const core = createCoreContext(source, {
+		nameMap: BONE_MAP,
+		targetPositions,
+		positionScale: DEFAULT_POSITION_SCALE, // patched below once bind FK exists
+		translationExports: positionTrackByCanonical.has('Hips')
+			? [{ srcBone: 'Hips', mmdBone: 'センター' }]
+			: [],
+	});
+
+	// Auto scale: ratio of the two skeletons' hip heights at bind. Works for cm,
+	// m or inch exports without knowing the unit. (Hips bind height comes from
+	// the rest translation, or the position track's first sample — see bindT.)
+	const hipsIdx = idxByCanonical.get('Hips');
+	const targetHipsY = targetPositions?.['下半身']?.[1];
+	if (hipsIdx !== undefined && targetHipsY !== undefined && targetHipsY > 1e-4) {
+		const srcHipsY = core.bindWorldPos[hipsIdx][1];
+		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
+	}
+
+	reportOnce(clip, core, trackByCanonical);
+
+	const out = retargetCoreClip(core, clip.name);
+	return { ...out, duration };
+}
+
+function depthOf(c: string, parentCache: Map<string, string | null>, guard = 0): number {
+	if (guard > 64) return guard;
+	const p = parentCache.get(c);
+	return p ? depthOf(p, parentCache, guard + 1) + 1 : 0;
+}
+
+/** One console line per clip: detected profile, scale, and what didn't map. */
+function reportOnce(clip: AnimationClip, core: RetargetCoreContext, trackByCanonical: Map<string, BoneTrack>): void {
+	if (reportedClips.has(clip.name)) return;
+	reportedClips.add(clip.name);
+	const profile = isUEMannequinClip(clip) ? 'UE-Mannequin/Unity' : 'Mixamo-style';
+	const unmapped = [...trackByCanonical.keys()].filter(c => !BONE_MAP[c] && c !== 'Root' && c !== 'Spine1');
+	const aligned = core.mappedBones.filter(b => b.frameAlign).length;
+	console.log(
+		`[retarget] "${clip.name}": ${profile}, scale=${core.positionScale.toFixed(4)}, ` +
+		`${core.mappedBones.length} mapped (${aligned} aligned), unmapped tracks: ${unmapped.join(', ') || 'none'}`,
+	);
 }

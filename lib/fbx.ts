@@ -458,9 +458,14 @@ class AnimationParser {
 				const lclTranslation = this.getLclTranslation(model);
 				const eulerOrder = "ZXY";
 				
-				// Extract rest pose for bone hierarchy computation
-				const restPose: BoneRestPose | null = lclRotation ? {
-					lclRotation: lclRotation,
+				// Extract rest pose for bone hierarchy computation. FBX omits any
+				// property whose value is the default — Mixamo drops Lcl Rotation for
+				// zero-rotation joints (several RIGHT-side bones) while their
+				// Lcl Translation and PreRotation still exist. Gating on lclRotation
+				// alone silently discarded those, collapsing right-side bind
+				// positions to the origin; a missing rotation just means zero.
+				const restPose: BoneRestPose | null = (lclRotation || lclTranslation || preRotation || postRotation) ? {
+					lclRotation: lclRotation ?? [0, 0, 0],
 					lclTranslation: lclTranslation,
 					preRotation: preRotation && preRotation.length >= 3 ? [preRotation[0], preRotation[1], preRotation[2]] as [number, number, number] : null,
 					postRotation: postRotation && postRotation.length >= 3 ? [postRotation[0], postRotation[1], postRotation[2]] as [number, number, number] : null,

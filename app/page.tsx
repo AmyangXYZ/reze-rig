@@ -4,7 +4,7 @@ import { Engine, Model, Vec3 } from "reze-engine"
 import { useCallback, useEffect, useRef, useState } from "react"
 import Loading from "@/components/loading"
 import { FBXLoader } from "@/lib/fbx"
-import { buildBindReferenceFromClip, retargetClips } from "@/lib/retarget"
+import { buildBindReferenceFromClip, measureTargetPositions, retargetClips } from "@/lib/retarget"
 import type { BoneRestPose } from "@/lib/fbx"
 import { convertToVMD, downloadBlob, getBlobURL } from "@/lib/vmd-writer"
 import { Button } from "@/components/ui/button"
@@ -29,6 +29,8 @@ export default function Home() {
   const modelRef = useRef<Model | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const ueBindRefRef = useRef<Map<string, BoneRestPose> | null>(null)
+  /** Target model's bind-pose bone positions, measured once after load. */
+  const targetPositionsRef = useRef<Record<string, [number, number, number]> | null>(null)
   const [engineError, setEngineError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [converting, setConverting] = useState(false)
@@ -54,7 +56,10 @@ export default function Home() {
         ? await fbxLoader.loadJsonAsync(fbxUrl)
         : await fbxLoader.loadAsync(fbxUrl)
 
-      const mmdClips = retargetClips(rawClips, { bindReference: ueBindRefRef.current })
+      const mmdClips = retargetClips(rawClips, {
+        bindReference: ueBindRefRef.current,
+        targetPositions: targetPositionsRef.current,
+      })
 
       if (mmdClips.length > 0) {
         const clip = mmdClips[0]
@@ -91,7 +96,7 @@ export default function Home() {
         // world+sun, dark #1c1c1e backdrop, charcoal ground. Colors below are the
         // linear-light equivalents of those sRGB hexes.
         const engine = new Engine(canvasRef.current, {
-          world: { color: new Vec3(1, 1, 1), strength: 0.35 },
+          world: { color: new Vec3(1, 1, 1), strength: 0.1 },
           sun: { color: new Vec3(1, 1, 1), strength: 2.0, direction: new Vec3(0.395, -0.358, 0.846) },
           background: new Vec3(0.11, 0.11, 0.118),
           camera: { distance: 35, target: new Vec3(0, 9, 0) },
@@ -118,6 +123,11 @@ export default function Home() {
 
         setLoading(false)
         engine.runRenderLoop()
+
+        // Measure the model's bind-pose bone positions (drives segment alignment
+        // and auto translation scale). Needs a settled frame, before any clip plays.
+        await new Promise((r) => requestAnimationFrame(r))
+        targetPositionsRef.current = measureTargetPositions((n) => model.getBoneWorldPosition(n))
 
         // Pre-load Idle.fbx as the canonical bind reference for UE-Mannequin / Unity
         // Humanoid clips. Some Unity per-pose exports (Run_Lfoot, Run_Stop_*) stash the
