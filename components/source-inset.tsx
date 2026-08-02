@@ -19,7 +19,8 @@ export const SourceInset = memo(function SourceInset({
   modelRef: RefObject<Model | null>
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const yawRef = useRef(-0.4)
+  /** Front view by default, matching the main scene's camera; drag to orbit. */
+  const yawRef = useRef(0)
   const dragRef = useRef<{ x: number; yaw: number } | null>(null)
 
   useEffect(() => {
@@ -56,6 +57,11 @@ export const SourceInset = memo(function SourceInset({
       const pos = preview.positionsAt(t)
       const cos = Math.cos(yaw)
       const sin = Math.sin(yaw)
+      // Slight downward camera tilt so depth reads — without it the Z axis
+      // would project onto the X axis and the ground cross collapses to a line.
+      const PITCH = 0.26
+      const cosP = Math.cos(PITCH)
+      const sinP = Math.sin(PITCH)
       // Root motion stays visible but the camera follows the hips laterally so
       // locomotion clips don't walk out of the frame.
       let cx = 0
@@ -68,22 +74,29 @@ export const SourceInset = memo(function SourceInset({
       const project = (p: [number, number, number]): [number, number] => {
         const x = p[0] - cx
         const z = p[2] - cz
-        // Yaw about Y, then orthographic: screen-x from rotated x, screen-y from height.
+        // Yaw about Y, then a pitched orthographic view.
         const rx = x * cos - z * sin
-        return [W / 2 + rx * scale, H / 2 - (p[1] - cy) * scale]
+        const rz = x * sin + z * cos
+        return [W / 2 + rx * scale, H / 2 - ((p[1] - cy) * cosP - rz * sinP) * scale]
       }
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, W, H)
 
-      // Ground line at the skeleton's bind floor.
-      const groundY = H / 2 - (minY - cy) * scale
-      ctx.strokeStyle = "rgba(255,255,255,0.12)"
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(10, groundY)
-      ctx.lineTo(W - 10, groundY)
-      ctx.stroke()
+      // Ground cross under the character: X and Z axes at the bind floor.
+      const axisLen = span * 0.6
+      const drawAxis = (a: [number, number, number], b: [number, number, number], color: string) => {
+        const pa = project(a)
+        const pb = project(b)
+        ctx.strokeStyle = color
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(pa[0], pa[1])
+        ctx.lineTo(pb[0], pb[1])
+        ctx.stroke()
+      }
+      drawAxis([cx - axisLen, minY, cz], [cx + axisLen, minY, cz], "rgba(255,130,130,0.35)")
+      drawAxis([cx, minY, cz - axisLen], [cx, minY, cz + axisLen], "rgba(130,160,255,0.4)")
 
       const pts = pos.map(project)
       // Bones: mapped bright, unmapped dimmed.

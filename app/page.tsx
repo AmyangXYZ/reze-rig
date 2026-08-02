@@ -421,7 +421,7 @@ export default function Home() {
               fontWeight: 400,
             }}
           >
-            Powered by [ <Link href="https://github.com/AmyangXYZ/reze-engine" target="_blank" className="text-blue-700 font-medium">Reze Engine</Link> ]
+            Powered by [ <Link href="https://github.com/AmyangXYZ/reze-engine" target="_blank" className="text-blue-600 font-medium">Reze Engine</Link> ]
           </h1>
         </div>
       )}
