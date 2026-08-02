@@ -13,7 +13,11 @@ import { join } from "node:path"
 
 import { parseFbxToAnimationClips } from "../lib/fbx"
 import { buildBindReferenceFromClip, retargetClips } from "../lib/retarget"
-import type { MmdSkeletonDump } from "../lib/hkx-retarget"
+
+/** Shape of public/mmd-skeleton.json (a bone-position dump of an MMD model). */
+interface MmdSkeletonDump {
+  bones: { name: string; worldPosition: number[] }[]
+}
 
 const ROOT = process.cwd()
 
