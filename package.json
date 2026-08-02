@@ -29,7 +29,7 @@
     "pako": "^2.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "reze-engine": "^0.9.5",
+    "reze-engine": "^0.27.3",
     "tailwind-merge": "^3.4.0",
     "three": "^0.183.2"
   },

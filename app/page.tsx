@@ -12,6 +12,16 @@ import { Slider } from "@/components/ui/slider"
 import { Play, Pause } from "lucide-react"
 import Link from "next/link"
 import Image from "next/image"
+import type { MaterialPresetMap } from "reze-engine"
+
+const DEFAULT_MODEL_KEY = "thoth"
+
+/** Fill the gaps in the engine's built-in CN name hints for the Thoth PMX
+ *  (grouping mirrors reze-design's hand-authored scene doc for this model). */
+const THOTH_STYLE_OVERRIDES: MaterialPresetMap = {
+  body: ["手"],
+  metal: ["指甲"],
+}
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -55,9 +65,9 @@ export default function Home() {
         setVmdBlob(vmd)
         setVmdFileName(vmdFileName)
 
-        await model.loadAnimation("default", vmdUrl)
+        await model.loadVmd("default", vmdUrl)
         model.show("default")
-        model.setMorphWeight("抗穿模", 0.5)
+        engine.resetPhysics()
 
         const prog = model.getAnimationProgress()
         setProgress(prog)
@@ -77,29 +87,37 @@ export default function Home() {
   const initEngine = useCallback(async () => {
     if (canvasRef.current) {
       try {
+        // Lit-studio palette (reze-design's neutral empty-scene defaults): white
+        // world+sun, dark #1c1c1e backdrop, charcoal ground. Colors below are the
+        // linear-light equivalents of those sRGB hexes.
         const engine = new Engine(canvasRef.current, {
-          ambientColor: new Vec3(0.96, 0.88, 0.92),
-          cameraDistance: 35,
-          cameraTarget: new Vec3(0, 9, 0),
+          world: { color: new Vec3(1, 1, 1), strength: 0.35 },
+          sun: { color: new Vec3(1, 1, 1), strength: 2.0, direction: new Vec3(0.395, -0.358, 0.846) },
+          background: new Vec3(0.11, 0.11, 0.118),
+          camera: { distance: 35, target: new Vec3(0, 9, 0) },
         })
         engineRef.current = engine
         await engine.init()
-        const model = await engine.loadModel("/models/reze/reze.pmx")
+        const model = await engine.loadModel(
+          DEFAULT_MODEL_KEY,
+          "/models/托特-扉页之吻/苍鹭·托特「扉页之吻」黑衣.pmx"
+        )
         modelRef.current = model
+        await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
         engine.addGround({
           width: 200,
           height: 200,
           fadeEnd: 100,
           fadeStart: 50,
-          diffuseColor: new Vec3(0.7, 0.7, 0.7),
+          diffuseColor: new Vec3(0.042, 0.042, 0.047),
+          opacity: 0.42,
         })
-        engine.setIKEnabled(false)
-        engine.setPhysicsEnabled(false)
-
+        // IK stays ON: the exported VMD carries per-chain IK-disable frames and
+        // engine 0.27 honors them. Physics on too — seeks call resetPhysics so
+        // scrubbing can't explode the cloth.
 
         setLoading(false)
         engine.runRenderLoop()
-        model.setMorphWeight("抗穿模", 0.5)
 
         // Pre-load Idle.fbx as the canonical bind reference for UE-Mannequin / Unity
         // Humanoid clips. Some Unity per-pose exports (Run_Lfoot, Run_Stop_*) stash the
@@ -197,6 +215,7 @@ export default function Home() {
       // If animation has ended (at 100%), restart from beginning
       if (progress.percentage >= 100) {
         modelRef.current?.seekAnimation(0)
+        engineRef.current.resetPhysics()
         setProgress({ ...progress, current: 0, percentage: 0 })
         await new Promise((resolve) => requestAnimationFrame(resolve))
       }
@@ -228,6 +247,7 @@ export default function Home() {
       if (engineRef.current && progress.duration > 0) {
         const seekTime = (value[0] / 100) * progress.duration
         modelRef.current?.seekAnimation(seekTime)
+        engineRef.current.resetPhysics()
         setProgress({ ...progress, current: seekTime, percentage: value[0] })
       }
     },
@@ -320,7 +340,7 @@ export default function Home() {
       )}
       {loading && !engineError && <Loading loading={loading} />}
 
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none z-1 bg-[#a0a0a0]" />
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none z-1 bg-[#1c1c1e]" />
 
       {/* Player Controls */}
       {!loading && !engineError && vmdBlob && (
