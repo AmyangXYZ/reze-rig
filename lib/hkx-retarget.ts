@@ -103,9 +103,10 @@ export const ER_BONE_MAP: Record<string, string> = {
   R_Foot: "右足首",
   R_Toe0: "右足先EX",
   R_Toe_302: "右つま先",
-  L_Finger0: "左親指１",
-  L_Finger01: "左親指２",
-  L_Finger02: "左親指３",
+  // MMD thumbs are 親指０/１/２ (the ０ is the metacarpal) — there is no 親指３.
+  L_Finger0: "左親指０",
+  L_Finger01: "左親指１",
+  L_Finger02: "左親指２",
   L_Finger1: "左人指１",
   L_Finger11: "左人指２",
   L_Finger12: "左人指３",
@@ -118,9 +119,9 @@ export const ER_BONE_MAP: Record<string, string> = {
   L_Finger4: "左小指１",
   L_Finger41: "左小指２",
   L_Finger42: "左小指３",
-  R_Finger0: "右親指１",
-  R_Finger01: "右親指２",
-  R_Finger02: "右親指３",
+  R_Finger0: "右親指０",
+  R_Finger01: "右親指１",
+  R_Finger02: "右親指２",
   R_Finger1: "右人指１",
   R_Finger11: "右人指２",
   R_Finger12: "右人指３",
@@ -133,6 +134,21 @@ export const ER_BONE_MAP: Record<string, string> = {
   R_Finger4: "右小指１",
   R_Finger41: "右小指２",
   R_Finger42: "右小指３",
+}
+
+/* ============================================================================
+ * MMD skeleton dump (from the engine's model, via console dump) → bind dirs.
+ * ========================================================================= */
+
+export interface MmdSkeletonBone {
+  index: number
+  name: string
+  parentIndex: number
+  worldPosition: number[]
+}
+
+export interface MmdSkeletonDump {
+  bones: MmdSkeletonBone[]
 }
 
 /* ============================================================================
@@ -223,15 +239,18 @@ interface MappedBone {
   /** Nearest mapped ancestor in the ER tree (its MMD name). Null if this is a root-mapped bone. */
   parentMmdName: string | null
   /**
-   * Frame-alignment rotation `F = F_mmd · F_er⁻¹` for transport-style retarget.
-   *   F_er  = B_er — the ER bone's full world bind rotation (real 3-axis frame).
-   *   F_mmd = quatFromForwardUp(d_mmd_bind, ER_local_Y_in_world) — synthetic MMD frame
-   *           with forward = MMD bone's natural tip direction and up reference taken
-   *           from ER's local Y, so F_mmd and F_er share their "up" axis as much as
-   *           possible (eliminates the axial-roll mismatch a world+Y up reference causes).
-   * `null` when the bone has no available tip — falls back to plain delta.
+   * Frame-alignment rotation `F = F_mmd · F_er⁻¹`, used as `W_target = Δ_er · F⁻¹`
+   * (absolute-pose alignment — see retargetFrame step 3). Both frames are built
+   * with quatFromForwardUp from the MAPPED-PAIR segment direction (bone → its
+   * mapped child(ren), measured on each skeleton's own bind pose) and a shared up
+   * reference (ER's local Y in world), so F⁻¹ maps the MMD segment direction
+   * exactly onto the ER segment direction without axial-roll surprises.
+   * `null` when the bone has no mapped child, no skeleton dump was provided, or
+   * the segment directions disagree by ≥90° — falls back to plain delta.
    */
   frameAlign: Q4 | null
+  /** Bind-pose segment-direction agreement (see frameAlign); null if not computed. */
+  alignDot: number | null
 }
 
 export interface HkxRetargetContext {
@@ -245,15 +264,22 @@ export interface HkxRetargetContext {
   boneToTrack: Int32Array
   /** ER bone index whose world position we export as 全ての親 translation. */
   rootPosIdx: number
+  /**
+   * ER bone index for センター translation (Root, the waist). ER splits whole-body
+   * movement across Master (locomotion / turns) and Root (crouch depth, pelvis
+   * drops) — exporting only Master silently flattens crouches. -1 when Root is
+   * absent or already serving as rootPosIdx.
+   */
+  centerPosIdx: number
 }
 
 export interface HkxRetargetOptions {
   /**
-   * Per-MMD-bone world-space tip direction (unit vector pointing from the bone to its
-   * natural successor — e.g. 左腕 → 左ひじ). Used to build the synthetic MMD bind frame
-   * for transport. Bones missing from this map fall back to plain delta.
+   * The target MMD model's skeleton (bind-pose world positions), used to measure
+   * mapped-pair segment directions for absolute-pose alignment. Without it every
+   * bone falls back to plain world delta.
    */
-  mmdBoneBindDirs?: Record<string, [number, number, number]>
+  mmdSkeleton?: MmdSkeletonDump
 }
 
 export interface FrameResult {
@@ -319,10 +345,9 @@ export function createRetargetContext(hkx: HkxAnimation, options?: HkxRetargetOp
   const nameToIdx = new Map<string, number>()
   for (let i = 0; i < n; i++) nameToIdx.set(hkx.bones[i].name, i)
 
-  const mmdDirs = options?.mmdBoneBindDirs ?? {}
-
-  // Build mapped bone list with nearest mapped ancestor and frame-alignment quat.
+  // Pass 1: mapped bone list with nearest mapped ancestor (true + engine-adjusted).
   const mappedBones: MappedBone[] = []
+  const trueParentByMmd = new Map<string, string | null>()
   for (const [erName, mmdName] of Object.entries(ER_BONE_MAP)) {
     const erIdx = nameToIdx.get(erName)
     if (erIdx === undefined) continue
@@ -339,50 +364,115 @@ export function createRetargetContext(hkx: HkxAnimation, options?: HkxRetargetOp
       }
       p = hkx.bones[p].parentIndex
     }
+    trueParentByMmd.set(mmdName, parentMmdName)
 
-    // 下半身 has MMD's "inherit rotation" trick that cancels its rotation in the leg
-    // chain (via 腰キャンセル at -100%) and is bypassed for upper body (上半身's actual
-    // PMX parent is 腰, not 下半身). So 下半身's animated rotation never reaches these
-    // bones in engine FK. Override their target parent to センター so VMD parent-local
-    // doesn't subtract a rotation the engine isn't applying.
-    if (parentMmdName === "下半身" && (mmdName === "上半身" || mmdName === "左足" || mmdName === "右足")) {
+    // 上半身's real PMX parent chain is 腰 ← グルーブ ← センター — it never inherits
+    // 下半身 (its ER counterpart Spine sits under Pelvis, so the ER walk lands on
+    // 下半身). 腰/グルーブ are never animated here, so its effective parent is
+    // センター. The legs are NOT overridden: their real chain is 腰キャンセル左/右
+    // ← 下半身, and the キャンセル bones cancel 腰's rotation (which stays
+    // identity), not 下半身's — the engine really does apply 下半身's rotation to
+    // the leg chain, so leg locals must subtract it. (Overriding legs to センター
+    // double-applied pelvis pitch: a forward lunge read as leaning backwards.)
+    if (parentMmdName === "下半身" && mmdName === "上半身") {
       parentMmdName = "センター"
     }
 
-    // Frame alignment: F = F_mmd · F_er⁻¹. Up reference for F_mmd is ER's local Y in
-    // world, so F_mmd's "up" matches F_er's "up" — the conjugation cleanly maps the
-    // rotation without introducing axial roll.
-    //
-    // Skip transport when ER and MMD bone forwards disagree by more than 60° (e.g. ER
-    // Pelvis points up to spine while MMD 下半身 points down to legs — a ~180° flip
-    // that would invert hip-twist direction). Falls back to plain delta, which is
-    // correct for direction-mismatched bones because their rotations live in the
-    // shared world frame anyway.
-    let frameAlign: Q4 | null = null
-    const raw = mmdDirs[mmdName]
-    if (raw) {
-      const l = Math.hypot(raw[0], raw[1], raw[2])
-      if (l > 1e-6) {
-        const dMmd: [number, number, number] = [raw[0] / l, raw[1] / l, raw[2] / l]
-        const fEr = erBindWorldRot[erIdx]
-        const dEr = q4Rot(fEr, [1, 0, 0]) // ER bone forward in world (+X local)
-        const dot = dMmd[0] * dEr[0] + dMmd[1] * dEr[1] + dMmd[2] * dEr[2]
-        if (dot > 0.5) {
-          const erLocalY = q4Rot(fEr, [0, 1, 0])
-          const fMmd = quatFromForwardUp(dMmd, erLocalY)
-          frameAlign = q4Normalize(q4Mul(fMmd, q4Conj(fEr)))
-        }
-      }
-    }
+    mappedBones.push({ erName, mmdName, erIdx, parentMmdName, frameAlign: null, alignDot: null })
+  }
 
-    mappedBones.push({ erName, mmdName, erIdx, parentMmdName, frameAlign })
+  // Pass 2: frame alignment from MAPPED-PAIR segment directions — the same
+  // anatomical segment measured on both skeletons: bone → its mapped child(ren),
+  // ER bind positions on one side, PMX bind positions on the other. (Averaging
+  // ALL PMX children instead poisons bones whose children aren't the skeletal
+  // continuation — 頭 averages eyes + hair physics, 足首 picks up non-toe
+  // helpers — which showed up as a constant head tilt and a flipped ankle.)
+  //
+  // Both frames are synthetic (forward = segment dir, shared up = ER local Y), so
+  // F⁻¹·d_mmd = d_er holds exactly and W_target·d_mmd = Δ_er·d_er every frame.
+  //
+  // Gate at dot > 0: below that the segments are different anatomy (ER Pelvis's
+  // bone axis points up to the spine), not a rest-angle difference. 全ての親 is
+  // skipped outright — it carries whole-body root motion, not a limb segment.
+  const mmdPosByName = new Map<string, [number, number, number]>()
+  for (const b of options?.mmdSkeleton?.bones ?? []) {
+    mmdPosByName.set(b.name, [b.worldPosition[0], b.worldPosition[1], b.worldPosition[2]])
+  }
+  const mappedChildren = new Map<string, MappedBone[]>()
+  for (const b of mappedBones) {
+    const tp = trueParentByMmd.get(b.mmdName)
+    if (!tp) continue
+    const arr = mappedChildren.get(tp)
+    if (arr) arr.push(b)
+    else mappedChildren.set(tp, [b])
+  }
+
+  if (mmdPosByName.size > 0) {
+    for (const bone of mappedBones) {
+      // Control bones, not limb segments: their rotation is whole-body/hip
+      // orientation, and an alignment offset on them swings every descendant's
+      // POSITION (child orientations cancel via the parent-local subtraction,
+      // positions don't) — it reads as a constant structural tilt.
+      if (bone.mmdName === "全ての親" || bone.mmdName === "センター") continue
+      const children = mappedChildren.get(bone.mmdName)
+      const mmdPos = mmdPosByName.get(bone.mmdName)
+      if (!children || children.length === 0 || !mmdPos) continue
+
+      const dEr: [number, number, number] = [0, 0, 0]
+      const dMmd: [number, number, number] = [0, 0, 0]
+      let usable = 0
+      for (const c of children) {
+        const cMmdPos = mmdPosByName.get(c.mmdName)
+        if (!cMmdPos) continue
+        const ep = erBindWorldPos[bone.erIdx]
+        const ec = erBindWorldPos[c.erIdx]
+        dEr[0] += ec[0] - ep[0]; dEr[1] += ec[1] - ep[1]; dEr[2] += ec[2] - ep[2]
+        dMmd[0] += cMmdPos[0] - mmdPos[0]; dMmd[1] += cMmdPos[1] - mmdPos[1]; dMmd[2] += cMmdPos[2] - mmdPos[2]
+        usable++
+      }
+      if (usable === 0) continue
+      const lEr = Math.hypot(dEr[0], dEr[1], dEr[2])
+      const lMmd = Math.hypot(dMmd[0], dMmd[1], dMmd[2])
+      // Tiny averages mean the children straddle the bone (センター's 上半身 up +
+      // 下半身 down nearly cancel) — no meaningful segment direction.
+      if (lEr < 1e-4 || lMmd < 1e-4) continue
+      const uEr: [number, number, number] = [dEr[0] / lEr, dEr[1] / lEr, dEr[2] / lEr]
+      const uMmd: [number, number, number] = [dMmd[0] / lMmd, dMmd[1] / lMmd, dMmd[2] / lMmd]
+      const dot = uEr[0] * uMmd[0] + uEr[1] * uMmd[1] + uEr[2] * uMmd[2]
+      bone.alignDot = dot
+      if (dot <= 0) continue
+
+      const erLocalY = q4Rot(erBindWorldRot[bone.erIdx], [0, 1, 0])
+      const fEr = quatFromForwardUp(uEr, erLocalY)
+      const fMmd = quatFromForwardUp(uMmd, erLocalY)
+      bone.frameAlign = q4Normalize(q4Mul(fMmd, q4Conj(fEr)))
+    }
   }
 
   // Whole-body translation source. Master is the top-level ER bone that carries
-  // world movement (jump, lying down, locomotion).
+  // world movement (jump, lying down, locomotion). Root (the waist, a child of
+  // Master) additionally carries crouch depth / pelvis drops → センター.
   const rootPosIdx = nameToIdx.get("Master") ?? nameToIdx.get("Root") ?? -1
+  const rootIdx = nameToIdx.get("Root") ?? -1
+  const centerPosIdx = rootIdx >= 0 && rootIdx !== rootPosIdx ? rootIdx : -1
 
-  return { hkx, mappedBones, erBindWorldRot, erBindWorldPos, boneToTrack, rootPosIdx }
+  return { hkx, mappedBones, erBindWorldRot, erBindWorldPos, boneToTrack, rootPosIdx, centerPosIdx }
+}
+
+/**
+ * Skeleton calibration: constant reference-pose error, cancelled per bone by
+ * right-multiplying `W_target = Δ_er · C`. For a constant local ref-pose offset
+ * this cancels exactly at every frame (W = I whenever the animation sits at its
+ * true neutral), while genuine animation on the bone passes through untouched.
+ *
+ * 頭: the c2190 skeleton's reference pose carries ~7.9° of head roll relative to
+ * the animation corpus's neutral — measured as the median world-delta
+ * z-component ≈ −0.069, tightly clustered across 8 of 10 melina clips
+ * (scripts/validate-hkx.ts). The joint wireframe can't show terminal-bone roll,
+ * but the skinned mesh reads it as a permanent leftward head tilt.
+ */
+const REF_POSE_BIAS_CORRECTION: Record<string, Q4> = {
+  頭: q4Normalize([0, 0, 0.069, 0.9976]),
 }
 
 /* ============================================================================
@@ -414,19 +504,24 @@ function retargetFrame(ctx: HkxRetargetContext, frameIdx: number): FrameResult {
   // Step 2: FK → animated ER world rotations.
   const erAnimWorldRot = fkWorldRotations(hkx, animLocal)
 
-  // Step 3: per mapped bone, transport ER world delta into MMD's bind frame.
+  // Step 3: per mapped bone, absolute-pose alignment.
   //   Δ_er     = R_er · B_er⁻¹           (world delta in ER's frame)
-  //   W_target = F · Δ_er · F⁻¹          (transport via F = F_mmd · F_er⁻¹)
+  //   W_target = Δ_er · F⁻¹              (F = F_mmd · F_er⁻¹)
+  // F⁻¹ maps the MMD bind direction onto ER's bind direction (F⁻¹·d_mmd = d_er),
+  // so W_target·d_mmd = Δ_er·d_er — the MMD segment points exactly where the ER
+  // segment points, every frame INCLUDING bind. The earlier conjugation form
+  // (F·Δ·F⁻¹) preserved MMD rest offsets instead, which made the pose inherit
+  // every bind mismatch: A-pose arms drifted ~35° vs ER's arms-down bind, and
+  // MMD's narrower thigh stance read as extra leg crossing. Roll stays sane
+  // because F's synthetic MMD frame shares ER's up axis.
   // Bones without a tip (no F) fall back to plain delta (F = identity).
   const targetByMmd: Record<string, Q4> = {}
   for (const bone of mappedBones) {
     const deltaEr = q4Mul(erAnimWorldRot[bone.erIdx], q4Conj(erBindWorldRot[bone.erIdx]))
-    if (bone.frameAlign) {
-      const F = bone.frameAlign
-      targetByMmd[bone.mmdName] = q4Normalize(q4Mul(q4Mul(F, deltaEr), q4Conj(F)))
-    } else {
-      targetByMmd[bone.mmdName] = deltaEr
-    }
+    let target = bone.frameAlign ? q4Mul(deltaEr, q4Conj(bone.frameAlign)) : deltaEr
+    const refBias = REF_POSE_BIAS_CORRECTION[bone.mmdName]
+    if (refBias) target = q4Mul(target, refBias)
+    targetByMmd[bone.mmdName] = q4Normalize(target)
   }
 
   // Step 4: q_vmd = W_target(mmd_parent)⁻¹ · W_target(mmd_b).
@@ -439,19 +534,37 @@ function retargetFrame(ctx: HkxRetargetContext, frameIdx: number): FrameResult {
     rotations[bone.mmdName] = new Quat(nq[0], nq[1], nq[2], nq[3])
   }
 
-  // Step 5: whole-body translation → 全ての親.
-  // センター in MMD behaves like a waist bone (upper-body-ish), so for jumps
-  // and lying-down poses we drive 全ての親 with the ER root's world-space
-  // displacement from its bind position.
+  // Step 5: whole-body translation. Master's world displacement → 全ての親
+  // (jump, lying down, locomotion). Root (waist) moves beyond Master for
+  // crouches / pelvis drops; that residual goes to センター, expressed in
+  // 全ての親's animated frame (its VMD parent) so turns don't skew it.
   const positions: Record<string, Vec3> = {}
   if (ctx.rootPosIdx >= 0) {
-    const wp = fkWorldPositions(hkx, animLocal, animLocalPos)[ctx.rootPosIdx]
+    const worldPos = fkWorldPositions(hkx, animLocal, animLocalPos)
+    const wp = worldPos[ctx.rootPosIdx]
     const bp = erBindWorldPos[ctx.rootPosIdx]
+    const masterDelta: [number, number, number] = [wp[0] - bp[0], wp[1] - bp[1], wp[2] - bp[2]]
     positions["全ての親"] = new Vec3(
-      (wp[0] - bp[0]) * POSITION_SCALE,
-      (wp[1] - bp[1]) * POSITION_SCALE,
-      (wp[2] - bp[2]) * POSITION_SCALE,
+      masterDelta[0] * POSITION_SCALE,
+      masterDelta[1] * POSITION_SCALE,
+      masterDelta[2] * POSITION_SCALE,
     )
+    if (ctx.centerPosIdx >= 0) {
+      const cw = worldPos[ctx.centerPosIdx]
+      const cb = erBindWorldPos[ctx.centerPosIdx]
+      let residual: [number, number, number] = [
+        cw[0] - cb[0] - masterDelta[0],
+        cw[1] - cb[1] - masterDelta[1],
+        cw[2] - cb[2] - masterDelta[2],
+      ]
+      const masterTarget = targetByMmd["全ての親"]
+      if (masterTarget) residual = q4Rot(q4Conj(masterTarget), residual)
+      positions["センター"] = new Vec3(
+        residual[0] * POSITION_SCALE,
+        residual[1] * POSITION_SCALE,
+        residual[2] * POSITION_SCALE,
+      )
+    }
   }
 
   return { rotations, positions }
@@ -474,7 +587,7 @@ export function retargetHkxClipWithCtx(ctx: HkxRetargetContext): RetargetedClip 
   const hkx = ctx.hkx
   const times = Array.from({ length: hkx.numFrames }, (_, i) => i / hkx.fps)
   const boneQuats: Record<string, Quat[]> = {}
-  const rootPositions: Vec3[] = []
+  const bonePositions: Record<string, Vec3[]> = {}
 
   for (let f = 0; f < hkx.numFrames; f++) {
     const { rotations, positions } = retargetFrame(ctx, f)
@@ -482,7 +595,10 @@ export function retargetHkxClipWithCtx(ctx: HkxRetargetContext): RetargetedClip 
       if (!boneQuats[name]) boneQuats[name] = []
       boneQuats[name].push(q)
     }
-    if (positions["全ての親"]) rootPositions.push(positions["全ての親"])
+    for (const [name, p] of Object.entries(positions)) {
+      if (!bonePositions[name]) bonePositions[name] = []
+      bonePositions[name].push(p)
+    }
   }
 
   const boneTracks: RetargetedBoneTrack[] = []
@@ -498,9 +614,11 @@ export function retargetHkxClipWithCtx(ctx: HkxRetargetContext): RetargetedClip 
   }
 
   const positionTracks: RetargetedPositionTrack[] = []
-  if (rootPositions.length === hkx.numFrames) {
-    const rootOrig = ctx.rootPosIdx >= 0 ? hkx.bones[ctx.rootPosIdx].name : "Root"
-    positionTracks.push({ name: "全ての親", originalName: rootOrig, times: [...times], positions: rootPositions })
+  for (const [mmdName, positions] of Object.entries(bonePositions)) {
+    if (positions.length !== hkx.numFrames) continue
+    const srcIdx = mmdName === "センター" ? ctx.centerPosIdx : ctx.rootPosIdx
+    const orig = srcIdx >= 0 ? hkx.bones[srcIdx].name : "Root"
+    positionTracks.push({ name: mmdName, originalName: orig, times: [...times], positions })
   }
 
   return { name: hkx.name, duration: hkx.duration, fps: hkx.fps, boneTracks, positionTracks }
