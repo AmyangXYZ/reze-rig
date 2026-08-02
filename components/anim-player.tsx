@@ -62,9 +62,9 @@ export const AnimPlayer = memo(function AnimPlayer({
         setProgress(last)
       }
       if (loopRef.current && !p.playing && !p.paused && p.duration > 0 && p.current >= p.duration - AT_END_EPS) {
-        // End → frame 0 teleports every bone; settle physics with it.
+        // Mixamo clips are loop-designed (last frame ≈ first), so end → 0 is no
+        // teleport — let physics carry through the wrap.
         m.seek(0)
-        engineRef.current?.resetPhysics()
         m.play()
       }
     }
@@ -83,8 +83,7 @@ export const AnimPlayer = memo(function AnimPlayer({
     } else if (p.duration > 0) {
       // Clip loaded but stopped (ended, or scrubbed while stopped).
       if (p.current >= p.duration - AT_END_EPS) {
-        m.seek(0)
-        engineRef.current?.resetPhysics() // same end→0 teleport as the loop path
+        m.seek(0) // loop-designed clips: end → 0 is continuous, no physics reset
       }
       m.play()
     }
