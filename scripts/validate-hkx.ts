@@ -165,10 +165,10 @@ function main(): void {
     console.log(`=== ${id} · ${hkx.duration.toFixed(2)}s · ${hkx.numFrames}f@${hkx.fps} ===`)
 
     // ---- retarget parent assumptions (needs the ER skeleton, hence per-clip) --
-    const assumed = new Map(ctx.mappedBones.map((b) => [b.mmdName, b.parentMmdName]))
+    const assumed = new Map(ctx.core.mappedBones.map((b) => [b.mmdName, b.parentMmdName]))
     console.log("  assumed parents: " +
       [...assumed.entries()].filter(([, p]) => p !== null).slice(0, 6).map(([b, p]) => `${b}←${p}`).join("  ") + "  …")
-    const plainDelta = ctx.mappedBones.filter((b) => !b.frameAlign)
+    const plainDelta = ctx.core.mappedBones.filter((b) => !b.frameAlign)
     const why = plainDelta.map((b) =>
       b.alignDot === null ? `${b.mmdName}(no segment)` : `${b.mmdName}(dot=${b.alignDot.toFixed(2)})`,
     )
@@ -243,7 +243,7 @@ function main(): void {
     // Constant offsets here render as a permanent lean/tilt of the upper body.
     console.log("  spine chain diagnostics:")
     for (const name of ["上半身", "上半身2", "首", "頭"]) {
-      const b = ctx.mappedBones.find((m) => m.mmdName === name)
+      const b = ctx.core.mappedBones.find((m) => m.mmdName === name)
       if (!b) continue
       if (b.frameAlign) {
         const [x, y, z, w] = b.frameAlign
@@ -260,9 +260,9 @@ function main(): void {
     // about the view axis (frontal tilt) vs total. Constant nonzero roll while
     // the wireframe looks straight = bone roll invisible to the joint plot.
     {
-      const head = ctx.mappedBones.find((m) => m.mmdName === "頭")
+      const head = ctx.core.mappedBones.find((m) => m.mmdName === "頭")
       if (head) {
-        const bTrack: number = ctx.boneToTrack[head.erIdx]
+        const bTrack: number = ctx.boneToTrack[head.srcIdx]
         let maxAng = 0
         let sumZ = 0
         let cnt = 0
@@ -281,8 +281,8 @@ function main(): void {
             const pi = hkx.bones[i].parentIndex
             wRot[i] = pi < 0 ? lr : qMul(wRot[pi], lr)
           }
-          const bind = ctx.erBindWorldRot[head.erIdx] as Q4
-          let delta = qMul(wRot[head.erIdx], [-bind[0], -bind[1], -bind[2], bind[3]])
+          const bind = ctx.core.bindWorldRot[head.srcIdx] as Q4
+          let delta = qMul(wRot[head.srcIdx], [-bind[0], -bind[1], -bind[2], bind[3]])
           if (delta[3] < 0) delta = [-delta[0], -delta[1], -delta[2], -delta[3]]
           const ang = (2 * Math.acos(Math.min(1, Math.abs(delta[3]))) * 180) / Math.PI
           if (ang > maxAng) maxAng = ang

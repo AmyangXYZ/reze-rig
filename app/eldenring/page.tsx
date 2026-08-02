@@ -1,8 +1,7 @@
 "use client"
 
-import { Engine, Model, Quat, Vec3 } from "reze-engine"
+import { Engine, Model, Vec3 } from "reze-engine"
 import { useCallback, useEffect, useRef, useState } from "react"
-import * as THREE from "three"
 import {
   ArcRotateCamera,
   Color3,
@@ -16,16 +15,12 @@ import {
   StandardMaterial,
   Vector3,
 } from "@babylonjs/core"
-import { AdvancedDynamicTexture, TextBlock } from "@babylonjs/gui"
 import Loading from "@/components/loading"
 import { loadHkxJson, type HkxAnimation } from "@/lib/hkx-loader"
 import {
-  computeHkxMmdFrame,
   computeHkxMmdFrameWithCtx,
   createRetargetContext,
   ER_BONE_MAP,
-  logHkxSkeletonDefaultsToConsole,
-  retargetHkxClip,
   retargetHkxClipWithCtx,
   type HkxRetargetContext,
   type MmdSkeletonDump,
@@ -42,7 +37,7 @@ type HkxManifest = {
   animations: string[]
 }
 
-type ThreeSceneBundle = {
+type SourceSceneBundle = {
   engine: BabylonEngine
   scene: Scene
   camera: ArcRotateCamera
@@ -50,59 +45,18 @@ type ThreeSceneBundle = {
 
 const MMD_MAPPABLE_BONES = new Set(Object.keys(ER_BONE_MAP))
 
-function rotateVecByQuat(q: Quat, v: Vec3): Vec3 {
-  const t = q.clone().multiply(new Quat(v.x, v.y, v.z, 0))
-  const r = t.multiply(q.clone().conjugate())
-  return new Vec3(r.x, r.y, r.z)
-}
-
-function computeMappedOnlyWorldPositions(anim: AnimData, frameIdx: number): Vec3[] {
-  const n = anim.bones.length
-  const wPos: Vec3[] = new Array(n)
-  const wRot: Quat[] = new Array(n)
-  const boneToTrack = new Map<number, number>()
-  for (let t = 0; t < anim.trackToBone.length; t++) boneToTrack.set(anim.trackToBone[t], t)
-  const frame = frameIdx >= 0 ? anim.frames[frameIdx] : null
-
-  for (let i = 0; i < n; i++) {
-    const ref = anim.refPose[i]
-    const name = anim.bones[i].name
-    const track = boneToTrack.get(i)
-    const useAnim = frame && track !== undefined && MMD_MAPPABLE_BONES.has(name)
-    const lr = useAnim
-      ? new Quat(frame[track].rotation[0], frame[track].rotation[1], frame[track].rotation[2], frame[track].rotation[3])
-      : new Quat(ref.rotation[0], ref.rotation[1], ref.rotation[2], ref.rotation[3])
-    const lt = useAnim
-      ? new Vec3(frame[track].translation[0], frame[track].translation[1], frame[track].translation[2])
-      : new Vec3(ref.translation[0], ref.translation[1], ref.translation[2])
-    const pi = anim.bones[i].parentIndex
-    if (pi < 0) {
-      wRot[i] = lr
-      wPos[i] = lt
-    } else {
-      wRot[i] = wRot[pi].clone().multiply(lr)
-      const rp = rotateVecByQuat(wRot[pi], lt)
-      wPos[i] = new Vec3(rp.x + wPos[pi].x, rp.y + wPos[pi].y, rp.z + wPos[pi].z)
-    }
-  }
-
-  return wPos
-}
-
-export default function HkxComparePage() {
-  const threeContainerRef = useRef<HTMLDivElement>(null)
-  const threeCanvasRef = useRef<HTMLCanvasElement>(null)
+export default function EldenRingPage() {
+  const sourceContainerRef = useRef<HTMLDivElement>(null)
+  const sourceCanvasRef = useRef<HTMLCanvasElement>(null)
   const mmdCanvasRef = useRef<HTMLCanvasElement>(null)
 
-  const sceneRef = useRef<ThreeSceneBundle | null>(null)
+  const sceneRef = useRef<SourceSceneBundle | null>(null)
   const sceneMeshRefs = useRef<Array<{ dispose: () => void }>>([])
   const skeletonMeshRefs = useRef<Array<{ dispose: () => void }>>([])
   const jointSpheresRef = useRef<Array<Mesh | null>>([])
   const boneLinesRef = useRef<LinesMesh | null>(null)
   const boneArrowRefs = useRef<LinesMesh[]>([])
   const boneLineMatRef = useRef<StandardMaterial | null>(null)
-  const boneLabelUiRef = useRef<AdvancedDynamicTexture | null>(null)
-  const boneLabelRefs = useRef<TextBlock[]>([])
   const animDataRef = useRef<AnimData | null>(null)
 
   const engineRef = useRef<Engine | null>(null)
@@ -119,7 +73,7 @@ export default function HkxComparePage() {
   const [loading, setLoading] = useState(true)
   const [loadingAnim, setLoadingAnim] = useState(false)
   const [engineError, setEngineError] = useState<string | null>(null)
-  const [threeError, setThreeError] = useState<string | null>(null)
+  const [sourceError, setSourceError] = useState<string | null>(null)
   const [currentFrame, setCurrentFrame] = useState(0)
   const [totalFrames, setTotalFrames] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -128,14 +82,6 @@ export default function HkxComparePage() {
   const [animInfo, setAnimInfo] = useState("")
   const [clipReady, setClipReady] = useState(false)
   const [hoveredBone, setHoveredBone] = useState<string | null>(null)
-  const [showRefPose, setShowRefPose] = useState(false)
-  const showRefPoseRef = useRef(false)
-  const [showNonMmdBones, setShowNonMmdBones] = useState(false)
-  const showNonMmdBonesRef = useRef(false)
-  const [showBoneLabels, setShowBoneLabels] = useState(true)
-  const showBoneLabelsRef = useRef(true)
-  const [mappedFkDebugMode, setMappedFkDebugMode] = useState(false)
-  const mappedFkDebugModeRef = useRef(false)
   const [clipDuration, setClipDuration] = useState(0)
 
   const findContainer = useCallback((json: Record<string, unknown>) => {
@@ -150,13 +96,11 @@ export default function HkxComparePage() {
     return null
   }, [])
 
-  const applyThreeSkeleton = useCallback((anim: AnimData, frameIdx: number) => {
+  const applySourceSkeleton = useCallback((anim: AnimData, frameIdx: number) => {
     const spheres = jointSpheresRef.current
     const scene = sceneRef.current?.scene
     if (!scene) return
-    const worldPos = mappedFkDebugModeRef.current
-      ? computeMappedOnlyWorldPositions(anim, frameIdx)
-      : computeWorldPositions(anim, frameIdx)
+    const worldPos = computeWorldPositions(anim, frameIdx)
     for (let i = 0; i < anim.bones.length && i < spheres.length; i++) {
       const sphere = spheres[i]
       if (!sphere) continue
@@ -164,13 +108,14 @@ export default function HkxComparePage() {
     }
     const lines: Vector3[][] = []
     for (let i = 0; i < anim.bones.length; i++) {
-      const iMappable = MMD_MAPPABLE_BONES.has(anim.bones[i].name)
-      if (!showNonMmdBonesRef.current && !iMappable) continue
+      if (!MMD_MAPPABLE_BONES.has(anim.bones[i].name)) continue
       const pi = anim.bones[i].parentIndex
       if (pi < 0) continue
-      const pMappable = MMD_MAPPABLE_BONES.has(anim.bones[pi].name)
-      if (!showNonMmdBonesRef.current && !pMappable) continue
-      lines.push([new Vector3(worldPos[pi].x, worldPos[pi].y, worldPos[pi].z), new Vector3(worldPos[i].x, worldPos[i].y, worldPos[i].z)])
+      if (!MMD_MAPPABLE_BONES.has(anim.bones[pi].name)) continue
+      lines.push([
+        new Vector3(worldPos[pi].x, worldPos[pi].y, worldPos[pi].z),
+        new Vector3(worldPos[i].x, worldPos[i].y, worldPos[i].z),
+      ])
     }
     if (boneLinesRef.current) {
       boneLinesRef.current.dispose()
@@ -179,7 +124,7 @@ export default function HkxComparePage() {
     for (const arrow of boneArrowRefs.current) arrow.dispose()
     boneArrowRefs.current = []
     if (lines.length === 0) return
-    const boneLine = MeshBuilder.CreateLineSystem("hkx-bones-lines", { lines, updatable: false }, scene)
+    const boneLine = MeshBuilder.CreateLineSystem("er-bones-lines", { lines, updatable: false }, scene)
     boneLine.material = boneLineMatRef.current
     boneLine.color = Color3.FromHexString("#4488ff")
     boneLinesRef.current = boneLine
@@ -206,7 +151,7 @@ export default function HkxComparePage() {
       arrowLines.push([left, b], [right, b])
     }
     if (arrowLines.length > 0) {
-      const arrows = MeshBuilder.CreateLineSystem("hkx-bone-arrows", { lines: arrowLines, updatable: false }, scene)
+      const arrows = MeshBuilder.CreateLineSystem("er-bone-arrows", { lines: arrowLines, updatable: false }, scene)
       arrows.material = boneLineMatRef.current
       arrows.color = Color3.FromHexString("#ffd84d")
       boneArrowRefs.current.push(arrows)
@@ -224,21 +169,18 @@ export default function HkxComparePage() {
       currentFrameRef.current = frameIdx
       setCurrentFrame(frameIdx)
 
-      const threeFrame = showRefPoseRef.current ? -1 : frameIdx
-      applyThreeSkeleton(anim, threeFrame)
-
-      if (!model) return
+      applySourceSkeleton(anim, frameIdx)
 
       const ctx = retargetCtxRef.current
-      const { rotations, positions } = ctx
-        ? computeHkxMmdFrameWithCtx(ctx, frameIdx)
-        : computeHkxMmdFrame(hkx, frameIdx)
+      if (!model || !ctx) return
+
+      const { rotations, positions } = computeHkxMmdFrameWithCtx(ctx, frameIdx)
       model.rotateBones(rotations, 1000 / 30)
       if (Object.keys(positions).length > 0) {
         model.moveBones(positions)
       }
     },
-    [applyThreeSkeleton],
+    [applySourceSkeleton],
   )
 
   const stopPlayback = useCallback(() => {
@@ -253,8 +195,6 @@ export default function HkxComparePage() {
     const hkx = hkxRef.current
     if (!hkx) return
     setIsPlaying(true)
-    showRefPoseRef.current = false
-    setShowRefPose(false)
     playStartRef.current = performance.now()
     frameAtPlayStart.current = currentFrameRef.current
 
@@ -278,9 +218,6 @@ export default function HkxComparePage() {
   const buildSkeleton = useCallback((anim: AnimData, scene: Scene) => {
     for (const m of skeletonMeshRefs.current) m.dispose()
     skeletonMeshRefs.current = []
-    const labelUi = boneLabelUiRef.current
-    for (const label of boneLabelRefs.current) labelUi?.removeControl(label)
-    boneLabelRefs.current = []
 
     const spheres: Array<Mesh | null> = new Array(anim.bones.length).fill(null)
     const matMappable = new StandardMaterial("mat-mappable", scene)
@@ -291,49 +228,27 @@ export default function HkxComparePage() {
     matImportant.disableLighting = true
     matImportant.diffuseColor = Color3.FromHexString("#66ddff")
     matImportant.emissiveColor = Color3.FromHexString("#66ddff")
-    const matNormal = new StandardMaterial("mat-normal", scene)
-    matNormal.disableLighting = true
-    matNormal.diffuseColor = Color3.FromHexString("#88ff00")
-    matNormal.emissiveColor = Color3.FromHexString("#88ff00")
     const matRoot = new StandardMaterial("mat-root", scene)
     matRoot.disableLighting = true
     matRoot.diffuseColor = Color3.FromHexString("#ff0044")
     matRoot.emissiveColor = Color3.FromHexString("#ff0044")
-    skeletonMeshRefs.current.push(matMappable, matImportant, matNormal, matRoot)
+    skeletonMeshRefs.current.push(matMappable, matImportant, matRoot)
 
     for (let i = 0; i < anim.bones.length; i++) {
       const name = anim.bones[i].name
-      if (name === "L_Foot_Target2" || name === "R_Foot_Target2") continue
-      const isMappable = MMD_MAPPABLE_BONES.has(name)
-      if (!showNonMmdBonesRef.current && !isMappable) continue
+      if (!MMD_MAPPABLE_BONES.has(name)) continue
       const isImportant = HKX_IMPORTANT_BONES.has(name)
       const isRoot = name === "Master" || name === "RootPos"
-      const diameter = isMappable || isImportant || isRoot ? 0.028 : 0.018
-      const sphere = MeshBuilder.CreateSphere(`hkx-joint-${i}`, { diameter, segments: 8 }, scene)
-      sphere.material = isRoot ? matRoot : isMappable ? matMappable : isImportant ? matImportant : matNormal
+      const sphere = MeshBuilder.CreateSphere(`er-joint-${i}`, { diameter: 0.028, segments: 8 }, scene)
+      sphere.material = isRoot ? matRoot : isImportant ? matImportant : matMappable
       sphere.metadata = { boneName: name, boneIdx: i }
       spheres[i] = sphere
       skeletonMeshRefs.current.push(sphere)
-      if (showBoneLabelsRef.current && labelUi) {
-        const label = new TextBlock(`hkx-label-${i}`, name)
-        label.color = isRoot ? "#ff5577" : isMappable ? "#ffffff" : "#88ff00"
-        label.fontSize = 16
-        label.outlineWidth = 2
-        label.outlineColor = "black"
-        label.resizeToFit = true
-        label.textHorizontalAlignment = TextBlock.HORIZONTAL_ALIGNMENT_CENTER
-        label.textVerticalAlignment = TextBlock.VERTICAL_ALIGNMENT_CENTER
-        label.isHitTestVisible = false
-        labelUi.addControl(label)
-        label.linkWithMesh(sphere)
-        label.linkOffsetY = -24
-        boneLabelRefs.current.push(label)
-      }
     }
     jointSpheresRef.current = spheres
 
     const boneLine = MeshBuilder.CreateLineSystem(
-      "hkx-bones-lines",
+      "er-bones-lines",
       { lines: [[new Vector3(0, 0, 0), new Vector3(0, 0, 0)]], updatable: true },
       scene,
     )
@@ -347,22 +262,12 @@ export default function HkxComparePage() {
     skeletonMeshRefs.current.push(boneLine, lineMat)
   }, [])
 
-  const rebuildThreeSkeleton = useCallback(() => {
-    const anim = animDataRef.current
-    const scene = sceneRef.current?.scene
-    if (!anim || !scene) return
-    buildSkeleton(anim, scene)
-    applyThreeSkeleton(anim, showRefPoseRef.current ? -1 : currentFrameRef.current)
-  }, [buildSkeleton, applyThreeSkeleton])
-
   const loadAnimation = useCallback(
     async (id: string) => {
       stopPlayback()
       modelRef.current?.resetAllBones()
       setLoadingAnim(true)
-      setAnimInfo(`Loading ${id}...`)
-      showRefPoseRef.current = false
-      setShowRefPose(false)
+      setAnimInfo(`Loading ${id}…`)
 
       try {
         const [animResp, skeletonResp] = await Promise.all([fetch(`/hkx/${id}.json`), fetch("/hkx/skeleton.json")])
@@ -403,12 +308,6 @@ export default function HkxComparePage() {
         const retargetCtx = createRetargetContext(hkx, { mmdSkeleton: mmdSkeletonRef.current ?? undefined })
         retargetCtxRef.current = retargetCtx
 
-        // One-shot: uncomment to dump the ER skeleton JSON to the console.
-        // if (!loggedHkxExportRef.current) {
-        //   loggedHkxExportRef.current = true
-        //   logHkxSkeletonDefaultsToConsole(hkx)
-        // }
-
         const scene = sceneRef.current?.scene
         if (scene) buildSkeleton(anim, scene)
 
@@ -417,9 +316,7 @@ export default function HkxComparePage() {
         setClipDuration(hkx.duration)
         setTotalFrames(hkx.numFrames)
         setCurrentFrame(0)
-        setAnimInfo(
-          `${id} · ${hkx.duration.toFixed(1)}s · ${hkx.numFrames}f@${hkx.fps} · ${clip.boneTracks.length} rot · ${clip.positionTracks?.length ?? 0} pos`,
-        )
+        setAnimInfo(`${hkx.duration.toFixed(1)}s · ${hkx.numFrames}f @ ${hkx.fps}fps`)
         applyFrame(0)
       } catch (err) {
         console.error(err)
@@ -434,27 +331,24 @@ export default function HkxComparePage() {
   )
 
   const handleExportVmd = useCallback(() => {
-    const hkx = hkxRef.current
-    if (!hkx) return
     const ctx = retargetCtxRef.current
-    const clip = ctx ? retargetHkxClipWithCtx(ctx) : retargetHkxClip(hkx)
+    if (!ctx) return
+    const clip = retargetHkxClipWithCtx(ctx)
     const hasData = clip.boneTracks.length > 0 || (clip.positionTracks?.length ?? 0) > 0
     if (!hasData) return
     downloadBlob(convertToVMD(clip, 30), `${animId}_er_mmd.vmd`)
   }, [animId])
 
-  const initThree = useCallback(() => {
-    const container = threeContainerRef.current
-    const canvas = threeCanvasRef.current
+  const initSourceScene = useCallback(() => {
+    const container = sourceContainerRef.current
+    const canvas = sourceCanvasRef.current
     if (!container || !canvas) return () => { }
 
     try {
       const engine = new BabylonEngine(canvas, true, { preserveDrawingBuffer: true, stencil: true })
       engine.setHardwareScalingLevel(1 / Math.min(window.devicePixelRatio, 2))
       const scene = new Scene(engine)
-      scene.clearColor = Color3.FromHexString("#111122").toColor4(1)
-      const labelUi = AdvancedDynamicTexture.CreateFullscreenUI("hkx-bone-label-ui", true, scene)
-      boneLabelUiRef.current = labelUi
+      scene.clearColor = Color3.FromHexString("#1c1c1e").toColor4(1)
 
       const camera = new ArcRotateCamera("cam", -Math.PI / 2, Math.PI / 3, 6, new Vector3(0, 0.8, 0), scene)
       camera.attachControl(canvas, true)
@@ -478,9 +372,9 @@ export default function HkxComparePage() {
       const minorGrid = MeshBuilder.CreateLineSystem("grid-minor", { lines: minorLines }, scene)
       const minorMat = new StandardMaterial("grid-minor-mat", scene)
       minorMat.disableLighting = true
-      minorMat.emissiveColor = Color3.FromHexString("#222233")
+      minorMat.emissiveColor = Color3.FromHexString("#2a2a30")
       minorGrid.material = minorMat
-      minorGrid.color = Color3.FromHexString("#222233")
+      minorGrid.color = Color3.FromHexString("#2a2a30")
 
       const centerGrid = MeshBuilder.CreateLineSystem(
         "grid-center",
@@ -489,10 +383,10 @@ export default function HkxComparePage() {
       )
       const centerMat = new StandardMaterial("grid-center-mat", scene)
       centerMat.disableLighting = true
-      centerMat.emissiveColor = Color3.FromHexString("#334455")
+      centerMat.emissiveColor = Color3.FromHexString("#3d3d46")
       centerGrid.material = centerMat
-      centerGrid.color = Color3.FromHexString("#334455")
-      sceneMeshRefs.current.push(minorGrid, minorMat, centerGrid, centerMat, labelUi)
+      centerGrid.color = Color3.FromHexString("#3d3d46")
+      sceneMeshRefs.current.push(minorGrid, minorMat, centerGrid, centerMat)
 
       const pointerObserver = scene.onPointerObservable.add((pointerInfo) => {
         if (pointerInfo.type !== PointerEventTypes.POINTERMOVE) return
@@ -525,13 +419,11 @@ export default function HkxComparePage() {
         sceneMeshRefs.current = []
         for (const m of skeletonMeshRefs.current) m.dispose()
         skeletonMeshRefs.current = []
-        boneLabelRefs.current = []
-        boneLabelUiRef.current = null
         engine.dispose()
         sceneRef.current = null
       }
     } catch (e) {
-      setThreeError(e instanceof Error ? e.message : String(e))
+      setSourceError(e instanceof Error ? e.message : String(e))
       return () => { }
     }
   }, [])
@@ -541,20 +433,17 @@ export default function HkxComparePage() {
     if (!canvas) return
     try {
       const engine = new Engine(canvas, {
-        world: { color: new Vec3(0.9, 0.9, 0.9) },
+        world: { color: new Vec3(1, 1, 1), strength: 0.35 },
+        sun: { color: new Vec3(1, 1, 1), strength: 2.0, direction: new Vec3(0.395, -0.358, 0.846) },
+        background: new Vec3(0.11, 0.11, 0.118),
         camera: { distance: 35, target: new Vec3(0, 9, 0) },
       })
       engineRef.current = engine
       await engine.init()
       const model = await engine.loadModel("/models/reze/reze.pmx")
       modelRef.current = model
-      // engine.addGround({
-      // 	width: 200,
-      // 	height: 200,
-      // 	fadeEnd: 100,
-      // 	fadeStart: 50,
-      // 	diffuseColor: new Vec3(0.0, 0.0, 0.05),
-      // })
+      // This page drives the skeleton directly (rotateBones/moveBones per frame),
+      // so the engine must not also run IK or physics against it.
       engine.setIKEnabled(false)
       engine.setPhysicsEnabled(false)
       engine.runRenderLoop()
@@ -586,20 +475,18 @@ export default function HkxComparePage() {
   }, [initEngine, loadAnimation])
 
   useEffect(() => {
-    const threeCleanup = initThree()
+    const sourceCleanup = initSourceScene()
     void bootstrapPage()
     return () => {
       stopPlayback()
-      threeCleanup?.()
+      sourceCleanup?.()
       engineRef.current?.dispose()
     }
-  }, [initThree, bootstrapPage, stopPlayback])
+  }, [initSourceScene, bootstrapPage, stopPlayback])
 
   const handleSliderChange = useCallback(
     (value: number[]) => {
       const frame = Math.round(value[0])
-      showRefPoseRef.current = false
-      setShowRefPose(false)
       if (isPlaying) {
         playStartRef.current = performance.now()
         frameAtPlayStart.current = frame
@@ -618,61 +505,12 @@ export default function HkxComparePage() {
     [loadAnimation, startPlayback],
   )
 
-  const toggleRefPose = useCallback(() => {
-    setShowRefPose((prev) => {
-      const next = !prev
-      showRefPoseRef.current = next
-      if (next) stopPlayback()
-      queueMicrotask(() => {
-        const anim = animDataRef.current
-        const model = modelRef.current
-        const ctx = retargetCtxRef.current
-        if (!anim) return
-        applyThreeSkeleton(anim, next ? -1 : currentFrameRef.current)
-        if (!model) return
-        if (next && ctx) {
-          const { rotations, positions } = computeHkxMmdFrameWithCtx(ctx, 0)
-          model.resetAllBones()
-          model.rotateBones(rotations, 1000 / 30)
-          if (Object.keys(positions).length > 0) model.moveBones(positions)
-          return
-        }
-        applyFrame(currentFrameRef.current)
-      })
-      return next
-    })
-  }, [stopPlayback, applyThreeSkeleton, applyFrame])
-
-  useEffect(() => {
-    showRefPoseRef.current = showRefPose
-  }, [showRefPose])
-
-  useEffect(() => {
-    showNonMmdBonesRef.current = showNonMmdBones
-    rebuildThreeSkeleton()
-  }, [showNonMmdBones, rebuildThreeSkeleton])
-
-  useEffect(() => {
-    showBoneLabelsRef.current = showBoneLabels
-    rebuildThreeSkeleton()
-  }, [showBoneLabels, rebuildThreeSkeleton])
-
-  useEffect(() => {
-    mappedFkDebugModeRef.current = mappedFkDebugMode
-    rebuildThreeSkeleton()
-  }, [mappedFkDebugMode, rebuildThreeSkeleton])
-
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.code !== "Space") return
       const target = event.target as HTMLElement | null
       const tag = target?.tagName
-      if (
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        tag === "SELECT" ||
-        target?.isContentEditable
-      ) {
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
         return
       }
       event.preventDefault()
@@ -686,7 +524,7 @@ export default function HkxComparePage() {
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [isPlaying, startPlayback, stopPlayback])
 
-  const panelError = engineError || threeError
+  const panelError = engineError || sourceError
 
   const fmtTime = (t: number) => {
     const m = Math.floor(Math.abs(t) / 60)
@@ -697,154 +535,120 @@ export default function HkxComparePage() {
   const remTime = clipDuration - curTime
 
   return (
-    <div className="fixed inset-0 flex w-full h-full flex-col overflow-hidden touch-none bg-black">
-      <header className="z-40 flex shrink-0 select-none items-center justify-between gap-3 border-b border-white/10 bg-black/90 px-4 py-2">
+    <div className="fixed inset-0 flex w-full h-full flex-col overflow-hidden touch-none bg-[#1c1c1e]">
+      <header className="z-40 flex h-12 shrink-0 select-none items-center justify-between gap-4 border-b border-white/10 px-4">
         <div className="flex min-w-0 items-center gap-4">
           <Link href="/">
             <h1
-              className="text-2xl font-light tracking-[0.2em] text-white uppercase cursor-pointer"
+              className="cursor-pointer text-lg font-light uppercase tracking-[0.25em] text-white"
               style={{ textShadow: "0 0 20px rgba(255,255,255,0.3), 0 2px 10px rgba(0,0,0,0.5)" }}
             >
-              HKX · FK / MMD
+              Elden Ring → VMD
             </h1>
           </Link>
+          <span className="hidden font-mono text-xs text-white/40 sm:inline">{animInfo}</span>
           {hoveredBone && (
-            <span className="text-cyan-300 text-sm font-mono bg-black/50 px-2 py-0.5 rounded truncate max-w-[min(30vw,200px)]">
+            <span className="truncate rounded bg-white/10 px-2 py-0.5 font-mono text-xs text-cyan-300">
               {hoveredBone}
             </span>
           )}
-          <span className="text-white/45 text-xs font-mono truncate max-w-[min(28vw,240px)] hidden lg:inline">
-            {animInfo}
-          </span>
         </div>
-
-        <div className="flex max-h-[44vh] w-full max-w-[min(100%,74rem)] flex-wrap items-center justify-end gap-2 overflow-y-auto rounded-md bg-black/35 p-1">
-          {animIds.map((id) => (
-            <Button
-              key={id}
-              size="sm"
-              variant={animId === id && !showRefPose ? "default" : "outline"}
-              onClick={() => {
-                showRefPoseRef.current = false
-                setShowRefPose(false)
-                handleAnimChange(id)
-              }}
-              disabled={loading || loadingAnim}
-              className={`text-xs px-2 py-1 h-7 ${animId === id && !showRefPose ? "bg-white text-black hover:bg-white/90" : ""}`}
-            >
-              {id.replace("a000_", "")}
-            </Button>
-          ))}
-          <Button
-            size="sm"
-            variant={showRefPose ? "default" : "outline"}
-            onClick={toggleRefPose}
-            disabled={loading || loadingAnim}
-            className={showRefPose ? "bg-cyan-500 text-black hover:bg-cyan-400 h-7" : "h-7"}
-          >
-            Ref Pose
-          </Button>
-          <Button
-            size="sm"
-            variant={showNonMmdBones ? "default" : "outline"}
-            onClick={() => setShowNonMmdBones((v) => !v)}
-            disabled={loading || loadingAnim}
-            className={showNonMmdBones ? "bg-purple-500 text-black hover:bg-purple-400 h-7" : "h-7"}
-          >
-            {showNonMmdBones ? "All Bones" : "MMD Bones"}
-          </Button>
-          <Button
-            size="sm"
-            variant={showBoneLabels ? "default" : "outline"}
-            onClick={() => setShowBoneLabels((v) => !v)}
-            disabled={loading || loadingAnim}
-            className={showBoneLabels ? "bg-sky-500 text-black hover:bg-sky-400 h-7" : "h-7"}
-          >
-            {showBoneLabels ? "Labels On" : "Labels Off"}
-          </Button>
-          <Button
-            size="sm"
-            variant={mappedFkDebugMode ? "default" : "outline"}
-            onClick={() => setMappedFkDebugMode((v) => !v)}
-            disabled={loading || loadingAnim}
-            className={mappedFkDebugMode ? "bg-amber-400 text-black hover:bg-amber-300 h-7" : "h-7"}
-          >
-            {mappedFkDebugMode ? "Mapped FK" : "Full FK"}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleExportVmd}
-            disabled={loading || loadingAnim || !clipReady}
-            className="gap-1 h-7"
-            title="ER→MMD retarget (30fps VMD)"
-          >
-            <Download className="w-4 h-4" />
-            VMD
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleExportVmd}
+          disabled={loading || loadingAnim || !clipReady}
+          className="h-8 gap-1.5"
+        >
+          <Download className="h-4 w-4" />
+          Download VMD
+        </Button>
       </header>
 
-      <div className="relative min-h-0 flex-1">
-        <div className="flex h-full min-h-0 w-full">
-          <div ref={threeContainerRef} className="relative min-h-0 w-1/2 min-w-0 border-r border-white/10">
-            <span className="pointer-events-none absolute left-2 top-2 z-10 text-[10px] uppercase tracking-wider text-white/50">
-              HKX Source
-            </span>
-            <canvas ref={threeCanvasRef} className="block h-full w-full touch-none" />
+      <div className="flex min-h-0 flex-1">
+        <aside className="flex w-32 shrink-0 flex-col border-r border-white/10">
+          <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-white/40">
+            Animations · {animIds.length}
           </div>
-          <div className="relative min-h-0 w-1/2 min-w-0">
-            <span className="pointer-events-none absolute left-2 top-2 z-10 text-[10px] uppercase tracking-wider text-white/50">
-              MMD Retarget
-            </span>
-            <canvas ref={mmdCanvasRef} className="block h-full w-full touch-none" />
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+            {animIds.map((id) => (
+              <button
+                key={id}
+                onClick={() => handleAnimChange(id)}
+                disabled={loading || loadingAnim}
+                className={`mb-0.5 block w-full rounded px-2 py-1 text-left font-mono text-xs transition-colors ${
+                  animId === id
+                    ? "bg-white text-black"
+                    : "text-white/60 hover:bg-white/10 hover:text-white"
+                } disabled:opacity-50`}
+              >
+                {id.replace("a000_", "")}
+              </button>
+            ))}
           </div>
-        </div>
+        </aside>
 
-        {panelError && (
-          <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/85 p-6 text-sm text-red-300">
-            {panelError}
+        <div className="relative min-h-0 min-w-0 flex-1">
+          <div className="flex h-full min-h-0 w-full">
+            <div ref={sourceContainerRef} className="relative min-h-0 w-1/2 min-w-0 border-r border-white/10">
+              <span className="pointer-events-none absolute left-3 top-2 z-10 text-[10px] uppercase tracking-wider text-white/40">
+                Elden Ring · HKX
+              </span>
+              <canvas ref={sourceCanvasRef} className="block h-full w-full touch-none" />
+            </div>
+            <div className="relative min-h-0 w-1/2 min-w-0">
+              <span className="pointer-events-none absolute left-3 top-2 z-10 text-[10px] uppercase tracking-wider text-white/40">
+                MMD Retarget
+              </span>
+              <canvas ref={mmdCanvasRef} className="block h-full w-full touch-none" />
+            </div>
           </div>
-        )}
 
-        {loading && !panelError && <Loading loading={loading} />}
+          {panelError && (
+            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/85 p-6 text-sm text-red-300">
+              {panelError}
+            </div>
+          )}
 
-        {!loading && !panelError && totalFrames > 0 && (
-          <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-50 flex justify-center">
-            <div className="pointer-events-auto mx-auto w-full max-w-4xl px-2 pr-4">
-              <div className="rounded-full bg-black/30 px-2 py-1 pr-4 backdrop-blur-xs">
-                <div className="flex items-center gap-3">
-                  {!isPlaying ? (
-                    <Button onClick={startPlayback} size="icon" variant="ghost" aria-label="Play">
-                      <Play />
-                    </Button>
-                  ) : (
-                    <Button onClick={stopPlayback} size="icon" variant="ghost" aria-label="Pause">
-                      <Pause />
-                    </Button>
-                  )}
+          {loading && !panelError && <Loading loading={loading} />}
 
-                  <div className="font-mono text-sm tabular-nums text-white">{fmtTime(curTime)}</div>
+          {!loading && !panelError && totalFrames > 0 && (
+            <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-50 flex justify-center">
+              <div className="pointer-events-auto mx-auto w-full max-w-4xl px-2 pr-4">
+                <div className="rounded-full bg-black/30 px-2 py-1 pr-4 backdrop-blur-xs">
+                  <div className="flex items-center gap-3">
+                    {!isPlaying ? (
+                      <Button onClick={startPlayback} size="icon" variant="ghost" aria-label="Play">
+                        <Play />
+                      </Button>
+                    ) : (
+                      <Button onClick={stopPlayback} size="icon" variant="ghost" aria-label="Pause">
+                        <Pause />
+                      </Button>
+                    )}
 
-                  <div className="min-w-0 flex-1">
-                    <Slider
-                      value={[currentFrame]}
-                      onValueChange={handleSliderChange}
-                      min={0}
-                      max={Math.max(totalFrames - 1, 1)}
-                      step={1}
-                      className="w-full"
-                    />
-                  </div>
+                    <div className="font-mono text-sm tabular-nums text-white">{fmtTime(curTime)}</div>
 
-                  <div className="text-right font-mono text-sm tabular-nums text-muted-foreground">
-                    {fmtTime(-remTime)}
+                    <div className="min-w-0 flex-1">
+                      <Slider
+                        value={[currentFrame]}
+                        onValueChange={handleSliderChange}
+                        min={0}
+                        max={Math.max(totalFrames - 1, 1)}
+                        step={1}
+                        className="w-full"
+                      />
+                    </div>
+
+                    <div className="text-right font-mono text-sm tabular-nums text-muted-foreground">
+                      {fmtTime(-remTime)}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   )

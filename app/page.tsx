@@ -5,11 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import Loading from "@/components/loading"
 import { FBXLoader } from "@/lib/fbx"
 import { buildBindReferenceFromClip, measureTargetPositions, retargetClips } from "@/lib/retarget"
-import type { BoneRestPose } from "@/lib/fbx"
-import { convertToVMD, downloadBlob, getBlobURL } from "@/lib/vmd-writer"
+import type { AnimationClip, BoneRestPose } from "@/lib/fbx"
+import { downloadArrayBuffer, toEngineClip } from "@/lib/engine-clip"
+import { unzipToFiles } from "@/lib/uploads"
+import { AnimPlayer } from "@/components/anim-player"
 import { Button } from "@/components/ui/button"
-import { Slider } from "@/components/ui/slider"
-import { Play, Pause } from "lucide-react"
 import Link from "next/link"
 import Image from "next/image"
 import type { MaterialPresetMap } from "reze-engine"
@@ -28,25 +28,46 @@ export default function Home() {
   const engineRef = useRef<Engine | null>(null)
   const modelRef = useRef<Model | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const modelInputRef = useRef<HTMLInputElement>(null)
   const ueBindRefRef = useRef<Map<string, BoneRestPose> | null>(null)
-  /** Target model's bind-pose bone positions, measured once after load. */
+  /** Target model's bind-pose bone positions, re-measured on every model swap. */
   const targetPositionsRef = useRef<Record<string, [number, number, number]> | null>(null)
+  /** Engine registry key of the currently loaded model (for removeModel on swap). */
+  const currentModelKeyRef = useRef(DEFAULT_MODEL_KEY)
+  /** Last parsed source clips — re-retargeted when the target model changes. */
+  const lastSourceRef = useRef<{ clips: AnimationClip[]; fileName?: string } | null>(null)
   const [engineError, setEngineError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [converting, setConverting] = useState(false)
-  const [vmdBlob, setVmdBlob] = useState<Blob | null>(null)
+  const [clipLoaded, setClipLoaded] = useState(false)
   const [vmdFileName, setVmdFileName] = useState<string | null>(null)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [isPaused, setIsPaused] = useState(false)
-  const [progress, setProgress] = useState({ current: 0, duration: 0, percentage: 0 })
+  /** Zip contained several PMX files — user picks which one to load. */
+  const [modelPick, setModelPick] = useState<{ files: File[]; paths: string[] } | null>(null)
 
-  const loadFBXAndPlay = useCallback(async (fbxUrl: string, fileName?: string) => {
+  /** Retarget parsed clips to the CURRENT model and start playback. */
+  const convertAndPlay = useCallback(async (rawClips: AnimationClip[], fileName?: string) => {
     const engine = engineRef.current
     const model = modelRef.current
     if (!engine || !model) return
 
-    setConverting(true)
+    const mmdClips = retargetClips(rawClips, {
+      bindReference: ueBindRefRef.current,
+      targetPositions: targetPositionsRef.current,
+    })
+    if (mmdClips.length === 0) return
 
+    const clip = mmdClips[0]
+    model.loadClip("default", toEngineClip(clip))
+    model.show("default")
+    engine.resetPhysics()
+    model.play()
+
+    setVmdFileName(fileName || clip.name + ".vmd")
+    setClipLoaded(true)
+  }, [])
+
+  const loadFBXAndPlay = useCallback(async (fbxUrl: string, fileName?: string) => {
+    setConverting(true)
     try {
       const fbxLoader = new FBXLoader()
       const isJson =
@@ -56,38 +77,61 @@ export default function Home() {
         ? await fbxLoader.loadJsonAsync(fbxUrl)
         : await fbxLoader.loadAsync(fbxUrl)
 
-      const mmdClips = retargetClips(rawClips, {
-        bindReference: ueBindRefRef.current,
-        targetPositions: targetPositionsRef.current,
-      })
-
-      if (mmdClips.length > 0) {
-        const clip = mmdClips[0]
-        const vmd = convertToVMD(clip, 30)
-        const vmdFileName = fileName || clip.name + '.vmd'
-        const vmdUrl = getBlobURL(vmd)
-
-        setVmdBlob(vmd)
-        setVmdFileName(vmdFileName)
-
-        await model.loadVmd("default", vmdUrl)
-        model.show("default")
-        engine.resetPhysics()
-
-        const prog = model.getAnimationProgress()
-        setProgress(prog)
-
-        model.playAnimation()
-        setIsPlaying(true)
-        setIsPaused(false)
-      }
+      lastSourceRef.current = { clips: rawClips, fileName }
+      await convertAndPlay(rawClips, fileName)
     } catch (error) {
       console.error("Error loading FBX:", error)
       setEngineError(error instanceof Error ? error.message : "Conversion error")
     } finally {
       setConverting(false)
     }
-  }, [])
+  }, [convertAndPlay])
+
+  /** Swap the target model, re-measure it, and re-retarget the current motion. */
+  const loadModelFromFiles = useCallback(async (files: File[], pmxFile: File) => {
+    const engine = engineRef.current
+    if (!engine) return
+    setConverting(true)
+    try {
+      const key = `u_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`
+      try {
+        engine.removeModel(currentModelKeyRef.current)
+      } catch {
+        /* stale key */
+      }
+      const model = await engine.loadModel(key, { files, pmxFile })
+      modelRef.current = model
+      currentModelKeyRef.current = key
+      await engine.autoStyleGroups(key)
+      await new Promise((r) => requestAnimationFrame(r))
+      targetPositionsRef.current = measureTargetPositions((n) => model.getBoneWorldPosition(n))
+      const src = lastSourceRef.current
+      if (src) await convertAndPlay(src.clips, src.fileName)
+    } catch (e) {
+      console.error("Model load failed:", e)
+      window.alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      setConverting(false)
+    }
+  }, [convertAndPlay])
+
+  const handleModelZip = useCallback(async (file: File) => {
+    try {
+      const files = await unzipToFiles(file)
+      const pmxs = files.filter((f) => f.name.toLowerCase().endsWith(".pmx"))
+      if (pmxs.length === 0) {
+        window.alert("No .pmx file found in this zip.")
+        return
+      }
+      if (pmxs.length === 1) {
+        await loadModelFromFiles(files, pmxs[0])
+      } else {
+        setModelPick({ files, paths: pmxs.map((f) => f.name).sort((a, b) => a.localeCompare(b)) })
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e))
+    }
+  }, [loadModelFromFiles])
 
   const initEngine = useCallback(async () => {
     if (canvasRef.current) {
@@ -173,97 +217,6 @@ export default function Home() {
     fileInputRef.current?.click()
   }, [])
 
-  // Format time as M:SS or MM:SS (with leading zero)
-  const formatTime = useCallback((seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${mins}:${secs.toString().padStart(2, "0")}`
-  }, [])
-
-  // Format remaining time (negative time shows as "-0:23")
-  const formatRemainingTime = useCallback((current: number, duration: number): string => {
-    const remaining = duration - current
-    if (remaining <= 0) return "0:00"
-    const mins = Math.floor(remaining / 60)
-    const secs = Math.floor(remaining % 60)
-    return `-${mins}:${secs.toString().padStart(2, "0")}`
-  }, [])
-
-  // Update progress using requestAnimationFrame for smooth updates
-  useEffect(() => {
-    let rafId: number | null = null
-
-    const updateProgress = () => {
-      if (modelRef.current && isPlaying && !isPaused) {
-        const prog = modelRef.current?.getAnimationProgress()
-        setProgress(prog || { current: 0, duration: 0, percentage: 0 })
-
-        // Auto-pause when animation ends
-        if (prog?.percentage >= 100) {
-          setIsPlaying(false)
-          setIsPaused(false)
-        } else {
-          rafId = requestAnimationFrame(updateProgress)
-        }
-      }
-    }
-
-    if (isPlaying && !isPaused) {
-      rafId = requestAnimationFrame(updateProgress)
-    }
-
-    return () => {
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId)
-      }
-    }
-  }, [isPlaying, isPaused])
-
-  // Play animation
-  const handlePlay = useCallback(async () => {
-    if (engineRef.current) {
-      // If animation has ended (at 100%), restart from beginning
-      if (progress.percentage >= 100) {
-        modelRef.current?.seekAnimation(0)
-        engineRef.current.resetPhysics()
-        setProgress({ ...progress, current: 0, percentage: 0 })
-        await new Promise((resolve) => requestAnimationFrame(resolve))
-      }
-      modelRef.current?.playAnimation()
-      setIsPlaying(true)
-      setIsPaused(false)
-    }
-  }, [progress])
-
-  // Pause animation
-  const handlePause = useCallback(() => {
-    if (modelRef.current) {
-      modelRef.current.pauseAnimation()
-      setIsPaused(true)
-    }
-  }, [])
-
-  // Resume animation
-  const handleResume = useCallback(() => {
-    if (modelRef.current) {
-      modelRef.current.playAnimation()
-      setIsPaused(false)
-    }
-  }, [])
-
-  // Seek to position
-  const handleSeek = useCallback(
-    (value: number[]) => {
-      if (engineRef.current && progress.duration > 0) {
-        const seekTime = (value[0] / 100) * progress.duration
-        modelRef.current?.seekAnimation(seekTime)
-        engineRef.current.resetPhysics()
-        setProgress({ ...progress, current: seekTime, percentage: value[0] })
-      }
-    },
-    [progress]
-  )
-
   useEffect(() => {
     void (async () => {
       initEngine()
@@ -275,14 +228,6 @@ export default function Home() {
       }
     }
   }, [initEngine])
-
-  useEffect(() => {
-    void (async () => {
-      if (engineRef.current && progress.percentage >= 100 && progress.duration > 1 / 30) {
-        handlePlay()
-      }
-    })()
-  }, [progress, handlePlay])
 
   return (
     <div className="fixed inset-0 w-full h-full overflow-hidden touch-none">
@@ -297,13 +242,13 @@ export default function Home() {
                 fontWeight: 400,
               }}
             >
-              FBX to VMD
+              REZE RIG
             </h1>
           </Link>
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Upload Button */}
+          {/* Motion upload */}
           <input
             ref={fileInputRef}
             type="file"
@@ -319,15 +264,37 @@ export default function Home() {
             {converting ? "Converting..." : "Upload FBX"}
           </Button>
 
-          {/* Download Button */}
-          {vmdBlob && vmdFileName && (
+          {/* Model upload (zip) */}
+          <input
+            ref={modelInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) void handleModelZip(file)
+              e.target.value = ""
+            }}
+            className="hidden"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => modelInputRef.current?.click()}
+            disabled={loading || converting}
+          >
+            Upload Model
+          </Button>
+
+          {/* Download */}
+          {clipLoaded && vmdFileName && (
             <Button
               size="sm"
               className="bg-black hover:bg-black/80 text-white"
               onClick={() => {
-                downloadBlob(vmdBlob, vmdFileName)
+                const buf = modelRef.current?.exportVmd("default")
+                if (buf) downloadArrayBuffer(buf, vmdFileName)
               }}
-              disabled={loading || converting || !vmdBlob || !vmdFileName}
+              disabled={loading || converting}
             >
               Download VMD
             </Button>
@@ -352,53 +319,49 @@ export default function Home() {
 
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none z-1 bg-[#1c1c1e]" />
 
-      {/* Player Controls */}
-      {!loading && !engineError && vmdBlob && (
-        <div className="absolute bottom-4 left-4 right-4 z-50">
-          <div className="max-w-4xl mx-auto px-2 pr-4 bg-black/30 backdrop-blur-xs rounded-full outline-none">
-            {/* Single Row: Play/Pause - Time - Slider - Remaining Time */}
-            <div className="flex items-center gap-3">
-              {/* Play/Pause Button (Left) */}
-              {!isPlaying ? (
-                <Button onClick={handlePlay} size="icon" variant="ghost" aria-label="Play">
-                  <Play />
-                </Button>
-              ) : isPaused ? (
-                <Button onClick={handleResume} size="icon" variant="ghost" aria-label="Resume">
-                  <Play />
-                </Button>
-              ) : (
-                <Button onClick={handlePause} size="icon" variant="ghost" aria-label="Pause">
-                  <Pause />
-                </Button>
-              )}
+      {/* Transport */}
+      {!loading && !engineError && (
+        <div className="absolute bottom-4 left-4 right-4 z-50 flex justify-center">
+          <AnimPlayer engineRef={engineRef} modelRef={modelRef} hasClip={clipLoaded} />
+        </div>
+      )}
 
-              {/* Start Time */}
-              <div className="text-white text-sm font-mono tabular-nums">{formatTime(progress.current)}</div>
-
-              {/* Progress Slider */}
-              <div className="flex-1">
-                <Slider
-                  value={[progress.percentage]}
-                  onValueChange={handleSeek}
-                  min={0}
-                  max={100}
-                  step={0.001}
-                  className="w-full"
-                  disabled={progress.duration === 0}
-                />
-              </div>
-
-              {/* Remaining Time (Right) */}
-              <div className="text-muted-foreground text-sm font-mono tabular-nums text-right">
-                {formatRemainingTime(progress.current, progress.duration)}
-              </div>
+      {/* Multiple PMX in the uploaded zip — pick one */}
+      {modelPick && (
+        <div
+          className="absolute inset-0 z-[70] flex items-center justify-center bg-black/70"
+          onClick={() => setModelPick(null)}
+        >
+          <div
+            className="w-[min(28rem,90vw)] rounded-xl border border-white/10 bg-zinc-950/90 p-4 backdrop-blur-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 text-sm text-white/80">This zip contains several PMX files — choose one:</div>
+            <div className="max-h-[50vh] space-y-1 overflow-y-auto">
+              {modelPick.paths.map((p) => (
+                <button
+                  key={p}
+                  className="block w-full truncate rounded px-3 py-2 text-left text-sm text-white/70 hover:bg-white/10 hover:text-white"
+                  onClick={() => {
+                    const f = modelPick.files.find((x) => x.name === p)
+                    setModelPick(null)
+                    if (f) void loadModelFromFiles(modelPick.files, f)
+                  }}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 text-right">
+              <Button size="sm" variant="ghost" onClick={() => setModelPick(null)}>
+                Cancel
+              </Button>
             </div>
           </div>
         </div>
       )}
 
-      {!vmdBlob && (
+      {!clipLoaded && (
         <div className="absolute z-10 left-6 bottom-4">
           <h1
             className="text-md text-white"
