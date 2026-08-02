@@ -335,10 +335,12 @@ export default function Home() {
 
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none z-1 bg-[#46ecd5]" />
 
-      {/* Transport */}
+      {/* Transport (wrapper spans the width — let clicks pass through to what's under it) */}
       {!loading && !engineError && (
-        <div className="absolute bottom-4 left-4 right-4 z-50 flex justify-center">
-          <AnimPlayer engineRef={engineRef} modelRef={modelRef} hasClip={clipLoaded} />
+        <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-50 flex justify-center">
+          <div className="pointer-events-auto">
+            <AnimPlayer engineRef={engineRef} modelRef={modelRef} hasClip={clipLoaded} />
+          </div>
         </div>
       )}
 
@@ -410,7 +412,7 @@ export default function Home() {
         </div>
       )}
 
-      {!clipLoaded && (
+      {!loading && (
         <div className="absolute z-10 left-6 bottom-4">
           <h1
             className="text-md text-teal-950"
