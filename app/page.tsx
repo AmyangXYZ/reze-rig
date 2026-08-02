@@ -4,7 +4,14 @@ import { Engine, Model, Vec3 } from "reze-engine"
 import { useCallback, useEffect, useRef, useState } from "react"
 import Loading from "@/components/loading"
 import { FBXLoader } from "@/lib/fbx"
-import { buildBindReferenceFromClip, measureTargetPositions, retargetClips } from "@/lib/retarget"
+import {
+  buildBindReferenceFromClip,
+  createSourcePreview,
+  measureTargetPositions,
+  retargetClips,
+  type SourcePreview,
+} from "@/lib/retarget"
+import { SourceInset } from "@/components/source-inset"
 import type { AnimationClip, BoneRestPose } from "@/lib/fbx"
 import { downloadArrayBuffer, toEngineClip } from "@/lib/engine-clip"
 import { unzipToFiles } from "@/lib/uploads"
@@ -41,6 +48,11 @@ export default function Home() {
   const [converting, setConverting] = useState(false)
   const [clipLoaded, setClipLoaded] = useState(false)
   const [vmdFileName, setVmdFileName] = useState<string | null>(null)
+  /** Ground-truth view of the parsed source skeleton, for the inset panel. */
+  const [sourcePreview, setSourcePreview] = useState<SourcePreview | null>(null)
+  /** Strip horizontal root motion (Mixamo's "In Place"). */
+  const [inPlace, setInPlace] = useState(false)
+  const inPlaceRef = useRef(inPlace)
   /** Zip contained several PMX files — user picks which one to load. */
   const [modelPick, setModelPick] = useState<{ files: File[]; paths: string[] } | null>(null)
 
@@ -53,6 +65,7 @@ export default function Home() {
     const mmdClips = retargetClips(rawClips, {
       bindReference: ueBindRefRef.current,
       targetPositions: targetPositionsRef.current,
+      inPlace: inPlaceRef.current,
     })
     if (mmdClips.length === 0) return
 
@@ -64,6 +77,12 @@ export default function Home() {
 
     setVmdFileName(fileName || clip.name + ".vmd")
     setClipLoaded(true)
+    setSourcePreview(
+      createSourcePreview(rawClips[0], {
+        bindReference: ueBindRefRef.current,
+        targetPositions: targetPositionsRef.current,
+      }),
+    )
   }, [])
 
   const loadFBXAndPlay = useCallback(async (fbxUrl: string, fileName?: string) => {
@@ -136,30 +155,27 @@ export default function Home() {
   const initEngine = useCallback(async () => {
     if (canvasRef.current) {
       try {
-        // Lit-studio palette (reze-design's neutral empty-scene defaults): white
-        // world+sun, dark #1c1c1e backdrop, charcoal ground. Colors below are the
-        // linear-light equivalents of those sRGB hexes.
+        // Teal studio: teal-300 #46ecd5 backdrop, teal-700 ground. White
+        // world+sun; background is display-space sRGB.
         const engine = new Engine(canvasRef.current, {
-          world: { color: new Vec3(1, 1, 1), strength: 0.1 },
+          world: { color: new Vec3(1, 1, 1), strength: 0.3 },
           sun: { color: new Vec3(1, 1, 1), strength: 2.0, direction: new Vec3(0.395, -0.358, 0.846) },
-          background: new Vec3(0.11, 0.11, 0.118),
+          background: new Vec3(0.275, 0.925, 0.835),
           camera: { distance: 35, target: new Vec3(0, 9, 0) },
         })
         engineRef.current = engine
         await engine.init()
         const model = await engine.loadModel(
           DEFAULT_MODEL_KEY,
-          "/models/托特-扉页之吻/苍鹭·托特「扉页之吻」黑衣.pmx"
+          "/models/托特/托特.pmx"
         )
         modelRef.current = model
         await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
+        // Ground: teal-600 #0d9488 in linear light.
         engine.addGround({
-          width: 200,
-          height: 200,
-          fadeEnd: 100,
-          fadeStart: 50,
-          diffuseColor: new Vec3(0.042, 0.042, 0.047),
-          opacity: 0.42,
+          diffuseColor: new Vec3(0.004, 0.296, 0.246),
+          gridLineColor: new Vec3(0.6, 0.95, 0.88),
+          opacity: 0.4,
         })
         // IK stays ON: the exported VMD carries per-chain IK-disable frames and
         // engine 0.27 honors them. Physics on too — seeks call resetPhysics so
@@ -235,9 +251,9 @@ export default function Home() {
         <div className="flex items-center gap-2">
           <Link href="/">
             <h1
-              className="text-2xl font-light tracking-[0.2em] md:tracking-[0.3em] text-white uppercase letter-spacing-wider"
+              className="text-2xl font-light tracking-[0.2em] md:tracking-[0.3em] text-teal-950 uppercase letter-spacing-wider"
               style={{
-                textShadow: "0 0 20px rgba(255, 255, 255, 0.3), 0 2px 10px rgba(0, 0, 0, 0.5)",
+                textShadow: "0 1px 8px rgba(255, 255, 255, 0.35)",
                 fontFamily: "var(--font-geist-sans)",
                 fontWeight: 400,
               }}
@@ -261,10 +277,10 @@ export default function Home() {
             className="hidden"
           />
           <Button
-            variant="outline"
             size="sm"
             onClick={() => modelInputRef.current?.click()}
             disabled={loading || converting}
+            className="border border-white/10 bg-zinc-950/70 text-white backdrop-blur-xs hover:bg-zinc-900"
           >
             Upload Model
           </Button>
@@ -317,12 +333,45 @@ export default function Home() {
       )}
       {loading && !engineError && <Loading loading={loading} />}
 
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none z-1 bg-[#1c1c1e]" />
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none z-1 bg-[#46ecd5]" />
 
       {/* Transport */}
       {!loading && !engineError && (
         <div className="absolute bottom-4 left-4 right-4 z-50 flex justify-center">
           <AnimPlayer engineRef={engineRef} modelRef={modelRef} hasClip={clipLoaded} />
+        </div>
+      )}
+
+      {/* Source skeleton inset (ground truth + conversion report) */}
+      {!loading && !engineError && sourcePreview && (
+        <div className="absolute left-4 top-16 z-40">
+          <SourceInset preview={sourcePreview} modelRef={modelRef} />
+        </div>
+      )}
+
+      {/* Conversion options — right edge, vertically centered */}
+      {!loading && !engineError && (
+        <div className="absolute right-4 top-1/2 z-40 flex -translate-y-1/2 flex-col gap-2">
+          {/* Mixamo-style "In Place": strip horizontal root motion, keep vertical */}
+          <Button
+            size="sm"
+            className={
+              inPlace
+                ? "border border-blue-400/40 bg-blue-500 text-white hover:bg-blue-400"
+                : "border border-white/10 bg-zinc-950/40 text-white/80 backdrop-blur-xs hover:bg-zinc-900"
+            }
+            onClick={() => {
+              const next = !inPlace
+              setInPlace(next)
+              inPlaceRef.current = next
+              const src = lastSourceRef.current
+              if (src) void convertAndPlay(src.clips, src.fileName)
+            }}
+            disabled={converting}
+            title="Strip horizontal root motion; jumps and crouches keep their height"
+          >
+            In Place
+          </Button>
         </div>
       )}
 
@@ -364,14 +413,13 @@ export default function Home() {
       {!clipLoaded && (
         <div className="absolute z-10 left-6 bottom-4">
           <h1
-            className="text-md text-white"
+            className="text-md text-teal-950"
             style={{
-              textShadow: "0 0 20px rgba(255, 255, 255, 0.2), 0 2px 10px rgba(0, 0, 0, 0.3)",
               fontFamily: "var(--font-geist-sans)",
               fontWeight: 400,
             }}
           >
-            Powered by [ <Link href="https://github.com/AmyangXYZ/reze-engine" target="_blank" className="text-blue-200 font-medium">Reze Engine</Link> ]
+            Powered by [ <Link href="https://github.com/AmyangXYZ/reze-engine" target="_blank" className="text-blue-700 font-medium">Reze Engine</Link> ]
           </h1>
         </div>
       )}

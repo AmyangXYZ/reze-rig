@@ -1,7 +1,8 @@
-import { Quat } from 'reze-engine';
+import { Quat, Vec3 } from 'reze-engine';
 import type { AnimationClip, BoneRestPose, BoneTrack } from './fbx';
 import {
 	createCoreContext,
+	fkWorldPositions,
 	retargetCoreClip,
 	type Q4,
 	type RetargetCoreContext,
@@ -410,6 +411,12 @@ export interface RetargetOptions {
 	 * from the two skeletons' hip heights.
 	 */
 	targetPositions?: Record<string, V3> | null;
+	/**
+	 * Strip horizontal root motion (Mixamo's "In Place"): the exported
+	 * translation keeps its vertical component — jumps and crouches survive —
+	 * while X/Z stay at the origin.
+	 */
+	inPlace?: boolean;
 }
 
 function calculateDuration(clip: AnimationClip): number {
@@ -435,7 +442,15 @@ export function retargetClips(clips: AnimationClip[], opts?: RetargetOptions): R
 	return clips.map(c => retargetOneClip(c, opts));
 }
 
-function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
+interface FbxCore {
+	source: RetargetSource
+	core: RetargetCoreContext
+	trackByCanonical: Map<string, BoneTrack>
+	duration: number
+}
+
+/** Parse one clip into a retarget-ready source skeleton + core context. */
+function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 	const duration = calculateDuration(clip);
 	const numFrames = Math.max(2, Math.round(duration * OUTPUT_FPS) + 1);
 
@@ -563,10 +578,88 @@ function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): Retargete
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
-	reportOnce(clip, core, trackByCanonical);
+	return { source, core, trackByCanonical, duration };
+}
 
+function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
+	const { core, trackByCanonical, duration } = buildFbxCore(clip, opts);
+	reportOnce(clip, core, trackByCanonical);
 	const out = retargetCoreClip(core, clip.name);
-	return { ...out, duration };
+	const positionTracks = opts?.inPlace
+		? out.positionTracks.map((t) => ({ ...t, positions: t.positions.map((p) => new Vec3(0, p.y, 0)) }))
+		: out.positionTracks;
+	return { ...out, positionTracks, duration };
+}
+
+/* ============================================================================
+ * Source preview (skeleton inset).
+ * ========================================================================= */
+
+export interface SourcePreviewBone {
+	name: string
+	parentIndex: number
+	/** Has an MMD counterpart (drawn bright vs dimmed). */
+	mapped: boolean
+}
+
+export interface SourcePreviewInfo {
+	profile: string
+	mappedCount: number
+	alignedCount: number
+	scale: number
+	unmapped: string[]
+}
+
+export interface SourcePreview {
+	bones: SourcePreviewBone[]
+	duration: number
+	info: SourcePreviewInfo
+	/** Source-skeleton world positions (source units, MMD-handed) at time t seconds. */
+	positionsAt(t: number): V3[]
+}
+
+/**
+ * Ground-truth view of the parsed source: the same skeleton, sampler and
+ * alignment context the retarget itself uses, exposed for the inset panel.
+ */
+export function createSourcePreview(clip: AnimationClip, opts?: RetargetOptions): SourcePreview {
+	const { source, core, trackByCanonical, duration } = buildFbxCore(clip, opts);
+
+	const bones: SourcePreviewBone[] = source.bones.map((b) => ({
+		name: b.name,
+		parentIndex: b.parentIndex,
+		mapped: BONE_MAP[b.name] !== undefined,
+	}));
+
+	const unmapped = [...trackByCanonical.keys()].filter(c => !BONE_MAP[c] && c !== 'Root' && c !== 'Spine1');
+	const info: SourcePreviewInfo = {
+		profile: isUEMannequinClip(clip) ? 'UE / Unity' : 'Mixamo',
+		mappedCount: core.mappedBones.length,
+		alignedCount: core.mappedBones.filter(b => b.frameAlign).length,
+		scale: core.positionScale,
+		unmapped,
+	};
+
+	const n = source.bones.length;
+	return {
+		bones,
+		duration,
+		info,
+		positionsAt(t: number): V3[] {
+			// Fractional frame: the FBX sampler slerps the original curves at
+			// continuous time, so the preview stays display-rate smooth instead of
+			// stepping at the export's 30fps quantum.
+			const frame = Math.max(0, Math.min(source.numFrames - 1, t * OUTPUT_FPS));
+			const rot: Q4[] = new Array(n);
+			const pos: V3[] = new Array(n);
+			for (let i = 0; i < n; i++) {
+				const s = source.sample(i, frame);
+				rot[i] = s ? s.rot : source.bones[i].bindLocalRot;
+				pos[i] = s ? s.pos : source.bones[i].bindLocalPos;
+			}
+			return fkWorldPositions(source.bones, rot, pos);
+		},
+	};
 }
 
 function depthOf(c: string, parentCache: Map<string, string | null>, guard = 0): number {

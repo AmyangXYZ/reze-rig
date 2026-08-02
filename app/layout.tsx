@@ -14,9 +14,10 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "Mixamo FBX to VMD",
-  description: "Convert Mixamo FBX animations to MMD VMD format",
-  keywords: ["WebGPU", "3D", "MMD", "Animation", "Mixamo", "FBX", "VMD"],
+  title: "Reze Rig — FBX to VMD",
+  description:
+    "Convert humanoid skeletal animations to MMD VMD in the browser. Auto rig detection (Mixamo, UE, Unity), any bind pose, any target PMX model.",
+  keywords: ["MMD", "VMD", "FBX", "Animation", "Retarget", "Mixamo", "Unity", "WebGPU", "3D"],
 }
 
 export default function RootLayout({

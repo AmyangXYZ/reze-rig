@@ -223,7 +223,7 @@ function fkWorldRotations(bones: SourceBone[], localRot: Q4[]): Q4[] {
   return out
 }
 
-function fkWorldPositions(bones: SourceBone[], localRot: Q4[], localPos: V3[]): V3[] {
+export function fkWorldPositions(bones: SourceBone[], localRot: Q4[], localPos: V3[]): V3[] {
   const n = bones.length
   const wRot: Q4[] = new Array(n)
   const wPos: V3[] = new Array(n)
