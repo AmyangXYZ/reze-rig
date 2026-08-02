@@ -138,7 +138,7 @@ export const AnimPlayer = memo(function AnimPlayer({
       </Button>
       <span className="shrink-0 text-xs leading-none text-muted-foreground tabular-nums">{fmt(current)}</span>
       <Slider
-        className="w-[min(24rem,42vw)] [&_[data-slot=slider-thumb]]:size-2.5 [&_[data-slot=slider-thumb]]:hover:ring-2 [&_[data-slot=slider-track]]:h-1"
+        className="w-[min(16rem,30vw)] [&_[data-slot=slider-thumb]]:size-2.5 [&_[data-slot=slider-thumb]]:hover:ring-2 [&_[data-slot=slider-track]]:h-1"
         value={[current]}
         min={0}
         max={Math.max(progress.duration, 0.01)}
