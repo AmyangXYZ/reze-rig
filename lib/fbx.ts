@@ -1053,7 +1053,7 @@ class AnimationParser {
 				
 				// Include intermediate frames (but not t=0, which is already added)
 				for (let t = step; t < 1; t += step) {
-					const Q = slerp(Q1, Q2, t);
+					const Q = Quat.slerp(Q1, Q2, t);
 					const E = quaternionToEuler(Q);
 					
 					times.push(initialTime + t * timeSpan);
@@ -1338,39 +1338,15 @@ function convertFBXTimeToSeconds(time: number): number {
  * Intrinsic **ZYX** Euler → quaternion — matches Three.js `Quaternion.setFromEuler` / FBXLoader **default** `RotationOrder` for **PreRotation** and **PostRotation** (not the animated Lcl order).
  */
 function eulerToQuatIntrinsicZYX(x: number, y: number, z: number): Quat {
-	const c1 = Math.cos(x / 2), s1 = Math.sin(x / 2);
-	const c2 = Math.cos(y / 2), s2 = Math.sin(y / 2);
-	const c3 = Math.cos(z / 2), s3 = Math.sin(z / 2);
-	return new Quat(
-		s1 * c2 * c3 - c1 * s2 * s3,
-		c1 * s2 * c3 + s1 * c2 * s3,
-		c1 * c2 * s3 - s1 * s2 * c3,
-		c1 * c2 * c3 + s1 * s2 * s3
-	).normalize();
+	return Quat.fromEulerOrder(x, y, z, "ZYX");
 }
 
-// Euler to Quaternion conversion function for ZXY order
-function eulerToQuaternionZXY(z: number, x: number, y: number): { x: number, y: number, z: number, w: number } {
-	const cz = Math.cos(z / 2);
-	const cx = Math.cos(x / 2);
-	const cy = Math.cos(y / 2);
-	const sz = Math.sin(z / 2);
-	const sx = Math.sin(x / 2);
-	const sy = Math.sin(y / 2);
-
-	return {
-		x: sx * cy * cz - cx * sy * sz,
-		y: cx * sy * cz + sx * cy * sz,
-		z: cx * cy * sz - sx * sy * cz,
-		w: cx * cy * cz + sx * sy * sz
-	};
-}
-
-// Helper to convert Euler to quaternion (always uses ZXY order)
-function eulerToQuaternionByOrder(x: number, y: number, z: number, _order: string): { x: number, y: number, z: number, w: number } {
-	// Always use ZXY order
-	if (_order !== 'ZXY') return { x: 0, y: 0, z: 0, w: 1 };
-	return eulerToQuaternionZXY(z, x, y);
+// Helper to convert Euler to quaternion. Only the 'ZXY'-labelled order is handled
+// (its historical local formula was intrinsic ZYX — same composition as Pre/Post);
+// anything else falls back to identity, as before.
+function eulerToQuaternionByOrder(x: number, y: number, z: number, _order: string): Quat {
+	if (_order !== 'ZXY') return Quat.identity();
+	return Quat.fromEulerOrder(x, y, z, "ZYX");
 }
 
 /** Full local rest **Pre·Lcl·Post⁻¹** (Three.FBXLoader-compatible): Lcl **ZXY** (see {@link AnimationParser} curves), Pre/Post **ZYX**, Post stored inverted in file. */
@@ -1418,53 +1394,10 @@ export function bindQuatFromRestPosePreLcl(rest: BoneRestPose | null): Quat | nu
 	return null;
 }
 
-// Quaternion slerp (spherical linear interpolation)
-function slerp(q1: Quat, q2: Quat, t: number): Quat {
-	const dot = q1.x * q2.x + q1.y * q2.y + q1.z * q2.z + q1.w * q2.w;
-	
-	// If dot < 0, negate one quaternion to take shorter path
-	let q2x = q2.x;
-	let q2y = q2.y;
-	let q2z = q2.z;
-	let q2w = q2.w;
-	
-	if (dot < 0) {
-		q2x = -q2x;
-		q2y = -q2y;
-		q2z = -q2z;
-		q2w = -q2w;
-	}
-	
-	// If quaternions are very close, use linear interpolation
-	if (Math.abs(dot) > 0.9995) {
-		const result = new Quat(
-			q1.x + (q2x - q1.x) * t,
-			q1.y + (q2y - q1.y) * t,
-			q1.z + (q2z - q1.z) * t,
-			q1.w + (q2w - q1.w) * t
-		);
-		// Normalize manually
-		const len = Math.sqrt(result.x * result.x + result.y * result.y + result.z * result.z + result.w * result.w);
-		if (len > 0) {
-			return new Quat(result.x / len, result.y / len, result.z / len, result.w / len);
-		}
-		return result;
-	}
-	
-	// Spherical linear interpolation
-	const theta = Math.acos(Math.abs(dot));
-	const sinTheta = Math.sin(theta);
-	const w1 = Math.sin((1 - t) * theta) / sinTheta;
-	const w2 = Math.sin(t * theta) / sinTheta;
-	
-	return new Quat(
-		w1 * q1.x + w2 * q2x,
-		w1 * q1.y + w2 * q2y,
-		w1 * q1.z + w2 * q2z,
-		w1 * q1.w + w2 * q2w
-	);
-}
-
+// NOTE: this decomposition is intrinsic ZXY (engine `Quat.toEulerOrder(q, "ZXY")`),
+// while every euler→quat composition in this file is intrinsic ZYX — the pair does not
+// round-trip for large angles (kept as-is to preserve existing retarget output; the
+// mismatch only affects the >=180° slerp-subdivision path in interpolateRotations).
 function quaternionToEuler(q: Quat): { x: number, y: number, z: number } {
     const qx = q.x, qy = q.y, qz = q.z, qw = q.w;
     

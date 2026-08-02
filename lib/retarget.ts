@@ -220,48 +220,23 @@ const OUTPUT_FPS = 30;
  * FBX rotation plumbing (Pre/Post/Lcl → parent-local quats).
  * ========================================================================= */
 
-function quatIdentity(): Quat {
-	return new Quat(0, 0, 0, 1);
-}
-
-function eulerToQuatZXY(x: number, y: number, z: number): Quat {
-	const cz = Math.cos(z / 2), cx = Math.cos(x / 2), cy = Math.cos(y / 2);
-	const sz = Math.sin(z / 2), sx = Math.sin(x / 2), sy = Math.sin(y / 2);
-	return new Quat(
-		sx * cy * cz - cx * sy * sz,
-		cx * sy * cz + sx * cy * sz,
-		cx * cy * sz - sx * sy * cz,
-		cx * cy * cz + sx * sy * sz,
-	).normalize();
-}
-
-/** Intrinsic ZYX (Three.FBXLoader convention for Pre/Post Rotation). */
-function eulerToQuatIntrinsicZYX(x: number, y: number, z: number): Quat {
-	const c1 = Math.cos(x / 2), s1 = Math.sin(x / 2);
-	const c2 = Math.cos(y / 2), s2 = Math.sin(y / 2);
-	const c3 = Math.cos(z / 2), s3 = Math.sin(z / 2);
-	return new Quat(
-		s1 * c2 * c3 - c1 * s2 * s3,
-		c1 * s2 * c3 + s1 * c2 * s3,
-		c1 * c2 * s3 - s1 * s2 * c3,
-		c1 * c2 * c3 + s1 * s2 * s3,
-	).normalize();
-}
+// Lcl, Pre, and Post rotations all use the same intrinsic-ZYX euler composition here
+// (Three.FBXLoader convention; the historical "ZXY" label for Lcl was the same formula).
+// Engine `Quat.fromEulerOrder(x, y, z, "ZYX")` is exactly that composition.
 
 function preQuat(rest: BoneRestPose | null): Quat {
-	if (!rest?.preRotation) return quatIdentity();
-	return eulerToQuatIntrinsicZYX(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2]);
+	if (!rest?.preRotation) return Quat.identity();
+	return Quat.fromEulerOrder(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2], "ZYX");
 }
 
 function postQuatInv(rest: BoneRestPose | null): Quat {
-	if (!rest?.postRotation) return quatIdentity();
-	const q = eulerToQuatIntrinsicZYX(rest.postRotation[0], rest.postRotation[1], rest.postRotation[2]);
-	return new Quat(-q.x, -q.y, -q.z, q.w);
+	if (!rest?.postRotation) return Quat.identity();
+	return Quat.fromEulerOrder(rest.postRotation[0], rest.postRotation[1], rest.postRotation[2], "ZYX").conjugate();
 }
 
 function lclBindQuat(rest: BoneRestPose | null): Quat {
-	if (!rest?.lclRotation) return quatIdentity();
-	return eulerToQuatZXY(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2]);
+	if (!rest?.lclRotation) return Quat.identity();
+	return Quat.fromEulerOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], "ZYX");
 }
 
 /** qPre · q · qPost⁻¹ — applied to either bind Lcl or per-frame Lcl identically. */
@@ -283,7 +258,7 @@ function lhV3(v: [number, number, number] | null): V3 {
  * ========================================================================= */
 
 function sampleBoneTrack(track: BoneTrack, time: number): Quat {
-	if (track.times.length === 0) return quatIdentity();
+	if (track.times.length === 0) return Quat.identity();
 	const idx = track.times.findIndex(t => t >= time);
 	if (idx === -1) {
 		const last = track.quats[track.quats.length - 1];
@@ -296,32 +271,7 @@ function sampleBoneTrack(track: BoneTrack, time: number): Quat {
 	const t0 = track.times[idx - 1];
 	const t1 = track.times[idx];
 	const u = (time - t0) / (t1 - t0);
-	const q0 = track.quats[idx - 1];
-	const q1 = track.quats[idx];
-	let dot = q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w;
-	let q1x = q1.x, q1y = q1.y, q1z = q1.z, q1w = q1.w;
-	if (dot < 0) {
-		q1x = -q1x; q1y = -q1y; q1z = -q1z; q1w = -q1w;
-		dot = -dot;
-	}
-	if (dot > 0.9995) {
-		return new Quat(
-			q0.x + (q1x - q0.x) * u,
-			q0.y + (q1y - q0.y) * u,
-			q0.z + (q1z - q0.z) * u,
-			q0.w + (q1w - q0.w) * u,
-		).normalize();
-	}
-	const angle = Math.acos(Math.min(1, dot));
-	const sinA = Math.sin(angle);
-	const w0 = Math.sin((1 - u) * angle) / sinA;
-	const w1 = Math.sin(u * angle) / sinA;
-	return new Quat(
-		w0 * q0.x + w1 * q1x,
-		w0 * q0.y + w1 * q1y,
-		w0 * q0.z + w1 * q1z,
-		w0 * q0.w + w1 * q1w,
-	).normalize();
+	return Quat.slerp(track.quats[idx - 1], track.quats[idx], u);
 }
 
 function samplePositions(times: number[], positions: [number, number, number][], time: number): [number, number, number] {
