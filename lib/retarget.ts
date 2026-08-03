@@ -93,10 +93,83 @@ const UE_MANNEQUIN_TO_MIXAMO: Record<string, string> = {
 	pinky_03_l: 'LeftHandPinky3',
 };
 
+/**
+ * 3ds Max Biped ("Bip001 L Thigh" style) → canonical Mixamo-style names. Keys are
+ * the part after the Bip prefix, lowercased, separators normalized to one space.
+ * Fingers: Finger0 = thumb … Finger4 = pinky, segments 01/02; Nub tips, Footsteps
+ * and Twist helpers stay unmapped on purpose.
+ */
+const BIPED_TO_MIXAMO: Record<string, string> = {
+	'pelvis': 'Hips',
+	'spine': 'Spine',
+	'spine1': 'Spine1',
+	'spine2': 'Spine2',
+	'spine3': 'Spine2',
+	'neck': 'Neck',
+	'neck1': 'Neck',
+	'head': 'Head',
+	'r clavicle': 'RightShoulder',
+	'r upperarm': 'RightArm',
+	'r forearm': 'RightForeArm',
+	'r hand': 'RightHand',
+	'l clavicle': 'LeftShoulder',
+	'l upperarm': 'LeftArm',
+	'l forearm': 'LeftForeArm',
+	'l hand': 'LeftHand',
+	'r thigh': 'RightUpLeg',
+	'r calf': 'RightLeg',
+	'r foot': 'RightFoot',
+	'r toe0': 'RightToeBase',
+	'l thigh': 'LeftUpLeg',
+	'l calf': 'LeftLeg',
+	'l foot': 'LeftFoot',
+	'l toe0': 'LeftToeBase',
+	'l finger0': 'LeftHandThumb1',
+	'l finger01': 'LeftHandThumb2',
+	'l finger02': 'LeftHandThumb3',
+	'l finger1': 'LeftHandIndex1',
+	'l finger11': 'LeftHandIndex2',
+	'l finger12': 'LeftHandIndex3',
+	'l finger2': 'LeftHandMiddle1',
+	'l finger21': 'LeftHandMiddle2',
+	'l finger22': 'LeftHandMiddle3',
+	'l finger3': 'LeftHandRing1',
+	'l finger31': 'LeftHandRing2',
+	'l finger32': 'LeftHandRing3',
+	'l finger4': 'LeftHandPinky1',
+	'l finger41': 'LeftHandPinky2',
+	'l finger42': 'LeftHandPinky3',
+	'r finger0': 'RightHandThumb1',
+	'r finger01': 'RightHandThumb2',
+	'r finger02': 'RightHandThumb3',
+	'r finger1': 'RightHandIndex1',
+	'r finger11': 'RightHandIndex2',
+	'r finger12': 'RightHandIndex3',
+	'r finger2': 'RightHandMiddle1',
+	'r finger21': 'RightHandMiddle2',
+	'r finger22': 'RightHandMiddle3',
+	'r finger3': 'RightHandRing1',
+	'r finger31': 'RightHandRing2',
+	'r finger32': 'RightHandRing3',
+	'r finger4': 'RightHandPinky1',
+	'r finger41': 'RightHandPinky2',
+	'r finger42': 'RightHandPinky3',
+};
+
 function canonicalizeBoneName(rawName: string): string {
 	const stripped = rawName.replace(/^mixamorig\d*:/i, '').trim();
 	const ueKey = stripped.toLowerCase();
-	return UE_MANNEQUIN_TO_MIXAMO[ueKey] ?? stripped;
+	const ue = UE_MANNEQUIN_TO_MIXAMO[ueKey];
+	if (ue) return ue;
+	// 3ds Max Biped: "Bip001 L Thigh" / "Bip01_Spine1" — strip the Bip prefix,
+	// normalize separators, look up. The bare "Bip001" root stays unmapped.
+	const bip = stripped.match(/^bip\d*[\s_]+(.+)$/i);
+	if (bip) {
+		const key = bip[1].replace(/[\s_]+/g, ' ').trim().toLowerCase();
+		const mapped = BIPED_TO_MIXAMO[key];
+		if (mapped) return mapped;
+	}
+	return stripped;
 }
 
 /* ============================================================================

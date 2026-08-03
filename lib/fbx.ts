@@ -1086,6 +1086,11 @@ export function parseFbxToAnimationClips(buffer: ArrayBuffer): AnimationClip[] {
 	return new AnimationParser(reader).parse();
 }
 
+/** Raw node-tree access for tooling/diagnostics (per-bone properties, orders, poses). */
+export function parseFbxTree(buffer: ArrayBuffer): FBXReader {
+	return new FBXReader(parseBinary(new Uint8Array(buffer)));
+}
+
 // Simple BinaryReader implementation
 class BinaryReader {
 	binary: Uint8Array;

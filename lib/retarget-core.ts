@@ -314,6 +314,7 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
     else mappedChildren.set(tp, [b])
   }
 
+  const alignCandidates: { bone: MappedBone; uSrc: V3; uMmd: V3; dot: number }[] = []
   for (const bone of mappedBones) {
     if (CONTROL_BONES.has(bone.mmdName)) continue
     const children = mappedChildren.get(bone.mmdName)
@@ -342,10 +343,22 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
     const uMmd: V3 = [dMmd[0] / lMmd, dMmd[1] / lMmd, dMmd[2] / lMmd]
     const dot = uSrc[0] * uMmd[0] + uSrc[1] * uMmd[1] + uSrc[2] * uMmd[2]
     bone.alignDot = dot
-    if (dot <= 0) continue
+    alignCandidates.push({ bone, uSrc, uMmd, dot })
+  }
+
+  // Posed-bind detection. A real rig disagrees with the target on at most a few
+  // segments (Mixamo/UE pass ~90% of the dot > 0 gate). When MOST segments fail,
+  // the file's embedded rest is a mid-action pose, not different anatomy — some
+  // Max/Biped action exports carry no T-pose at all — and the gate would strand
+  // nearly every bone on plain delta. In that case trust absolute alignment
+  // everywhere: F is exactly the correction from the posed bind to the target's.
+  const gatePasses = alignCandidates.filter((c) => c.dot > 0).length
+  const posedBind = alignCandidates.length >= 8 && gatePasses < alignCandidates.length * 0.5
+  for (const c of alignCandidates) {
+    if (!posedBind && c.dot <= 0) continue
 
     // W_target = Δ · conj(F) needs conj(F)·d_mmd = d_src, i.e. F·d_src = d_mmd.
-    bone.frameAlign = q4FromTo(uSrc, uMmd)
+    c.bone.frameAlign = q4FromTo(c.uSrc, c.uMmd)
   }
 
   // Fingers: per-segment absolute alignment is ill-conditioned — the source
