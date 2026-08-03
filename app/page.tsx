@@ -171,14 +171,8 @@ export default function Home() {
         })
         engineRef.current = engine
         await engine.init()
-        if (USE_DEFAULT_ASSETS) {
-          const model = await engine.loadModel(
-            DEFAULT_MODEL_KEY,
-            "/models/托特/托特.pmx"
-          )
-          modelRef.current = model
-          await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
-        }
+        // Stage first — ground and render loop up before model bytes arrive,
+        // so the page opens on the scene instead of a blocked load.
         // Ground: teal-600 #0d9488 in linear light.
         engine.addGround({
           diffuseColor: new Vec3(0.004, 0.296, 0.246),
@@ -188,9 +182,19 @@ export default function Home() {
         // IK stays ON: the exported VMD carries per-chain IK-disable frames and
         // engine 0.27 honors them. Physics on too — seeks call resetPhysics so
         // scrubbing can't explode the cloth.
-
         setLoading(false)
         engine.runRenderLoop()
+        if (USE_DEFAULT_ASSETS) {
+          const model = await engine.loadModel(
+            DEFAULT_MODEL_KEY,
+            "/models/托特/托特.pmx"
+          )
+          // Hidden until styled — the reveal wears the intended look.
+          engine.setModelTransform(DEFAULT_MODEL_KEY, { visible: false })
+          modelRef.current = model
+          await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
+          engine.setModelTransform(DEFAULT_MODEL_KEY, { visible: true })
+        }
 
         // Measure the model's bind-pose bone positions (drives segment alignment
         // and auto translation scale). Needs a settled frame, before any clip plays.
