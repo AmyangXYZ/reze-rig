@@ -628,6 +628,28 @@ function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): Retargete
 	let positionTracks = out.positionTracks;
 	if (opts?.inPlace) {
 		const center = out.positionTracks.find((t) => t.name === 'センター');
+		// In place removes TRAVEL, never SWAY. A stationary clip (idle, turn in
+		// place) has no travel to remove: its root only shifts weight side to
+		// side, and the leg rotations are authored to compensate for exactly
+		// that shift. Delete the shift and — with leg IK disabled on export —
+		// the uncancelled compensation slides the feet across the floor.
+		// Cyclic vs travelling is decided by net displacement over path length:
+		// a walk cycle goes somewhere (ratio → 1), a weight shift returns home
+		// (ratio → 0). Self-scaling, no magic distance threshold.
+		let net = 0;
+		let path = 0;
+		if (center && center.positions.length > 1) {
+			const ps = center.positions;
+			const first = ps[0];
+			const last = ps[ps.length - 1];
+			net = Math.hypot(last.x - first.x, last.z - first.z);
+			for (let i = 1; i < ps.length; i++) {
+				path += Math.hypot(ps[i].x - ps[i - 1].x, ps[i].z - ps[i - 1].z);
+			}
+		}
+		if (path > 1e-6 && net / path < 0.25) {
+			return { ...out, positionTracks: out.positionTracks, duration };
+		}
 		positionTracks = out.positionTracks.map((t) => {
 			if (t.name === 'センター') return { ...t, positions: t.positions.map((p) => new Vec3(0, p.y, 0)) };
 			return {
