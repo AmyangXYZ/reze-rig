@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "n
 import { basename, join } from "node:path"
 
 import { parseFbxToAnimationClips } from "../lib/fbx"
-import { buildBindReferenceFromClip, retargetClips } from "../lib/retarget"
+import { buildBindReferenceFromClip, measureTargetPositions, retargetClips } from "../lib/retarget"
 import { toEngineClip } from "../lib/engine-clip"
 import { VMDWriter, PmxLoader } from "reze-engine"
 
@@ -24,32 +24,17 @@ interface MmdSkeletonDump {
   bones: { name: string; worldPosition: number[] }[]
 }
 
-/** Bind-pose world positions measured from the actual target PMX — the CLI twin of the
- *  site's live measureTargetPositions. Never a canned skeleton dump: alignment (foot
- *  direction especially — heels!) must respect the model the VMDs will play on. */
+/** Bind-pose world positions measured from the actual target PMX — the SAME
+ *  path the site uses: load the model, settle a rest frame, and read
+ *  getBoneWorldPosition through measureTargetPositions. A hand-rolled
+ *  bind-translation accumulation drifted from the runtime skeleton and left
+ *  constant per-bone alignment offsets (visible at the ankles: feet swaying
+ *  with the body instead of planted). One code path, one truth. */
 function measurePmxTargetPositions(pmxPath: string): Record<string, [number, number, number]> {
   const buf = readFileSync(pmxPath)
   const model = PmxLoader.loadFromBuffer(toArrayBuffer(buf))
-  const bones = model.getSkeleton().bones
-  const world: ([number, number, number] | null)[] = new Array(bones.length).fill(null)
-  const compute = (i: number): [number, number, number] => {
-    const cached = world[i]
-    if (cached) return cached
-    const b = bones[i]
-    const p: [number, number, number] = b.parentIndex >= 0 ? compute(b.parentIndex) : [0, 0, 0]
-    const w: [number, number, number] = [
-      p[0] + b.bindTranslation[0],
-      p[1] + b.bindTranslation[1],
-      p[2] + b.bindTranslation[2],
-    ]
-    world[i] = w
-    return w
-  }
-  const out: Record<string, [number, number, number]> = {}
-  for (let i = 0; i < bones.length; i++) {
-    if (!(bones[i].name in out)) out[bones[i].name] = compute(i)
-  }
-  return out
+  model.update(1 / 60) // settled rest frame, exactly like the site before measuring
+  return measureTargetPositions((n) => model.getBoneWorldPosition(n))
 }
 
 function collectFbx(path: string, out: string[]): void {
@@ -72,10 +57,12 @@ function main(): void {
   let inPlace = false
   let footIK = false
   let bindRefPath: string | null = null
+  let noBindRef = false
   let targetPmxPath: string | null = null
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--out") outDir = args[++i]
     else if (args[i] === "--in-place") inPlace = true
+    else if (args[i] === "--no-bind-ref") noBindRef = true
     else if (args[i] === "--foot-ik") footIK = true
     else if (args[i] === "--bind-ref") bindRefPath = args[++i]
     else if (args[i] === "--target-pmx") targetPmxPath = args[++i]
@@ -111,12 +98,17 @@ function main(): void {
   }
 
   const refFile = bindRefPath ?? files.find((f) => basename(f).toLowerCase() === "idle.fbx") ?? null
+  // Default bind reference = the site's bundled Idle.fbx, exactly like the
+  // app: Unity per-pose exports stash the first animation frame as the rest
+  // pose, and retargeting against that baseline bakes constant per-bone
+  // offsets into every output. --bind-ref overrides; --no-bind-ref opts out.
   let bindReference: ReturnType<typeof buildBindReferenceFromClip> | null = null
-  if (refFile) {
-    const refClips = parseFbxToAnimationClips(toArrayBuffer(readFileSync(refFile)))
+  const effectiveRef = refFile ?? (noBindRef ? null : join(import.meta.dirname, "../public/fbx/Idle.fbx"))
+  if (effectiveRef) {
+    const refClips = parseFbxToAnimationClips(toArrayBuffer(readFileSync(effectiveRef)))
     if (refClips[0]) {
       bindReference = buildBindReferenceFromClip(refClips[0])
-      console.log(`bind reference: ${refFile}`)
+      console.log(`bind reference: ${effectiveRef}`)
     }
   }
 
