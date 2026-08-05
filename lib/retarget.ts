@@ -3,6 +3,11 @@ import type { AnimationClip, BoneRestPose, BoneTrack } from './fbx';
 import {
 	createCoreContext,
 	fkWorldPositions,
+	q4Conj,
+	q4FromTo,
+	q4Mul,
+	q4Normalize,
+	q4Rot,
 	retargetCoreClip,
 	type Q4,
 	type RetargetCoreContext,
@@ -473,11 +478,169 @@ export function retargetClips(clips: AnimationClip[], opts?: RetargetOptions): R
 	return clips.map(c => retargetOneClip(c, opts));
 }
 
+/* ============================================================================
+ * Global frame alignment.
+ * ========================================================================= */
+
+/** Bone pairs whose bind-pose difference gives a skeleton's up / side axis. */
+const SRC_UP_PROBES: [string, string][] = [['Hips', 'Head'], ['Hips', 'Neck'], ['Hips', 'Spine2'], ['Hips', 'Spine1'], ['Hips', 'Spine']];
+const SRC_SIDE_PROBES: [string, string][] = [['RightUpLeg', 'LeftUpLeg'], ['RightArm', 'LeftArm'], ['RightShoulder', 'LeftShoulder']];
+const MMD_UP_PROBES: [string, string][] = [['下半身', '頭'], ['下半身', '首'], ['下半身', '上半身2'], ['下半身', '上半身']];
+const MMD_SIDE_PROBES: [string, string][] = [['右足', '左足'], ['右腕', '左腕'], ['右肩', '左肩']];
+
+/**
+ * How far the measurement may sit from the exact axis rotation blamed for it.
+ * Two rigs never agree perfectly — different proportions tilt the measured
+ * frame by a few degrees — so the correction is only trusted when an axis
+ * error explains nearly all of what was measured.
+ */
+const FRAME_FIX_TOLERANCE_DEG = 25;
+
+/** The 24 right-handed signed-permutation bases: every exact axis rotation. */
+const AXIS_ROTATIONS: [V3, V3, V3][] = (() => {
+	const out: [V3, V3, V3][] = [];
+	for (const perm of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+		for (let signs = 0; signs < 8; signs++) {
+			const cols = [0, 1, 2].map((i) => {
+				const v: V3 = [0, 0, 0];
+				v[perm[i]] = (signs >> i) & 1 ? -1 : 1;
+				return v;
+			}) as [V3, V3, V3];
+			if (vDot(vCross(cols[0], cols[1]), cols[2]) > 0) out.push(cols);
+		}
+	}
+	return out;
+})();
+
+function vSub(a: V3, b: V3): V3 {
+	return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function vNormalize(v: V3): V3 | null {
+	const l = Math.hypot(v[0], v[1], v[2]);
+	return l > 1e-6 ? [v[0] / l, v[1] / l, v[2] / l] : null;
+}
+
+function vDot(a: V3, b: V3): number {
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function vCross(a: V3, b: V3): V3 {
+	return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+/** Component of `v` perpendicular to unit `axis`, normalized. */
+function vReject(v: V3, axis: V3): V3 | null {
+	const d = vDot(v, axis);
+	return vNormalize([v[0] - d * axis[0], v[1] - d * axis[1], v[2] - d * axis[2]]);
+}
+
+/** First probe pair whose bones both exist and span a usable direction. */
+function probeAxis(pairs: [string, string][], posOf: (name: string) => V3 | null): V3 | null {
+	for (const [from, to] of pairs) {
+		const a = posOf(from);
+		const b = posOf(to);
+		if (!a || !b) continue;
+		const dir = vNormalize(vSub(b, a));
+		if (dir) return dir;
+	}
+	return null;
+}
+
+/** Rotation taking the source's (up, side) frame onto the target's. */
+function frameAlignQuat(upSrc: V3, sideSrc: V3, upTgt: V3, sideTgt: V3): Q4 {
+	const g1 = q4FromTo(upSrc, upTgt);
+	// Twist about the target's up until the sides agree. Signed angle rather
+	// than another shortest arc: at exactly 180° — a rig facing backwards —
+	// shortest-arc would pick an arbitrary perpendicular axis.
+	const a = vReject(q4Rot(g1, sideSrc), upTgt);
+	const b = vReject(sideTgt, upTgt);
+	if (!a || !b) return g1;
+	const ang = Math.atan2(vDot(vCross(a, b), upTgt), vDot(a, b));
+	const h = ang / 2;
+	const s = Math.sin(h);
+	const g2: Q4 = [upTgt[0] * s, upTgt[1] * s, upTgt[2] * s, Math.cos(h)];
+	return q4Normalize(q4Mul(g2, g1));
+}
+
+function q4AngleDeg(q: Q4): number {
+	return (2 * Math.acos(Math.min(1, Math.abs(q[3]))) * 180) / Math.PI;
+}
+
+/**
+ * Nearest exact axis rotation to `q` — a quarter or half turn about cardinal
+ * axes, which is the only kind of frame error a file format actually produces.
+ * Snapping means an axis-swapped file converts to exactly what the same file
+ * upright would, instead of also having its rig's own few-degree bind offset
+ * quietly removed.
+ */
+function snapToAxisRotation(q: Q4): Q4 {
+	const image: [V3, V3, V3] = [q4Rot(q, [1, 0, 0]), q4Rot(q, [0, 1, 0]), q4Rot(q, [0, 0, 1])];
+	let best = AXIS_ROTATIONS[0];
+	let bestScore = -Infinity;
+	for (const cols of AXIS_ROTATIONS) {
+		const score = vDot(cols[0], image[0]) + vDot(cols[1], image[1]) + vDot(cols[2], image[2]);
+		if (score > bestScore) {
+			bestScore = score;
+			best = cols;
+		}
+	}
+	return frameAlignQuat([1, 0, 0], [0, 1, 0], best[0], best[1]);
+}
+
+/**
+ * The rotation that carries the SOURCE skeleton's bind frame onto the TARGET
+ * model's — the fix for files whose world frame isn't the target's.
+ *
+ * An FBX may be authored Z-up, or carry its up-axis conversion on a node above
+ * the animated bones (which this parser never sees, keeping only nodes that
+ * have animation curves). Either way the parsed skeleton stands along the wrong
+ * axis, and absolute segment alignment then faithfully poses the model in that
+ * same wrong frame: the whole body reads as face-down. GlobalSettings can't
+ * settle it — exporters disagree with their own data, and a file that both
+ * declares Z-up and bakes the conversion into a root node would be corrected
+ * twice.
+ *
+ * So measure, the way the rest of this pipeline does. Up (hips → head) and side
+ * (right → left leg) come from each skeleton's own BIND pose — never from the
+ * animation, whose frame 0 may legitimately be lying down — and one frame
+ * rotates onto the other.
+ */
+function measureFrameFix(
+	bindWorld: V3[],
+	idxByCanonical: Map<string, number>,
+	targetPositions: Record<string, V3> | undefined,
+): { q: Q4; deg: number } | null {
+	if (!targetPositions) return null;
+	const srcPos = (name: string): V3 | null => {
+		const i = idxByCanonical.get(name);
+		return i === undefined ? null : bindWorld[i];
+	};
+	const tgtPos = (name: string): V3 | null => targetPositions[name] ?? null;
+
+	const upSrc = probeAxis(SRC_UP_PROBES, srcPos);
+	const sideSrc = probeAxis(SRC_SIDE_PROBES, srcPos);
+	const upTgt = probeAxis(MMD_UP_PROBES, tgtPos);
+	const sideTgt = probeAxis(MMD_SIDE_PROBES, tgtPos);
+	if (!upSrc || !sideSrc || !upTgt || !sideTgt) return null;
+
+	const measured = frameAlignQuat(upSrc, sideSrc, upTgt, sideTgt);
+	const snapped = snapToAxisRotation(measured);
+	const deg = q4AngleDeg(snapped);
+	if (deg < 1) return null; // frames already agree up to rig differences
+	// Only correct what an axis error explains: a rig that simply sits at an odd
+	// angle is left to the per-bone alignment, which is built for exactly that.
+	const residual = q4AngleDeg(q4Mul(measured, q4Conj(snapped)));
+	return residual <= FRAME_FIX_TOLERANCE_DEG ? { q: snapped, deg } : null;
+}
+
 interface FbxCore {
 	source: RetargetSource
 	core: RetargetCoreContext
 	trackByCanonical: Map<string, BoneTrack>
 	duration: number
+	/** Global frame correction applied to the source, in degrees (0 = none). */
+	frameFixDeg: number
 }
 
 /** Parse one clip into a retarget-ready source skeleton + core context. */
@@ -570,6 +733,10 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		});
 	}
 
+	// Set once the source's world frame is measured against the target's; the
+	// root bones carry it, so every descendant inherits it through FK.
+	let frameFix: Q4 | null = null;
+
 	const source: RetargetSource = {
 		bones,
 		numFrames,
@@ -578,17 +745,39 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 			const b = bones[boneIdx];
 			if (!b.track && !b.posTimes) return null;
 			const time = frame / OUTPUT_FPS;
-			const rot = b.track
+			let rot = b.track
 				? lhQ4(applyPrePost(sampleBoneTrack(b.track, time), b.pre, b.postInv))
 				: b.bindLocalRot;
-			const pos = b.posTimes && b.posValues
+			let pos = b.posTimes && b.posValues
 				? lhV3(samplePositions(b.posTimes, b.posValues, time))
 				: b.bindLocalPos;
+			if (frameFix && b.parentIndex < 0) {
+				rot = q4Normalize(q4Mul(frameFix, rot));
+				pos = q4Rot(frameFix, pos);
+			}
 			return { rot, pos };
 		},
 	};
 
 	const targetPositions = opts?.targetPositions ?? undefined;
+
+	// Global frame check, before anything reads the skeleton: measure the bind
+	// pose as parsed, and if it doesn't stand the way the target model does,
+	// rotate the roots so it does. Bind locals move with the sampler above, so
+	// the core sees one consistent frame.
+	const fix = measureFrameFix(
+		fkWorldPositions(bones, bones.map((b) => b.bindLocalRot), bones.map((b) => b.bindLocalPos)),
+		idxByCanonical,
+		targetPositions,
+	);
+	if (fix) {
+		frameFix = fix.q;
+		for (const b of bones) {
+			if (b.parentIndex >= 0) continue;
+			b.bindLocalRot = q4Normalize(q4Mul(fix.q, b.bindLocalRot));
+			b.bindLocalPos = q4Rot(fix.q, b.bindLocalPos);
+		}
+	}
 
 	const core = createCoreContext(source, {
 		nameMap: BONE_MAP,
@@ -615,12 +804,12 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
-	return { source, core, trackByCanonical, duration };
+	return { source, core, trackByCanonical, duration, frameFixDeg: fix?.deg ?? 0 };
 }
 
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
-	const { core, trackByCanonical, duration } = buildFbxCore(clip, opts);
-	reportOnce(clip, core, trackByCanonical);
+	const { core, trackByCanonical, duration, frameFixDeg } = buildFbxCore(clip, opts);
+	reportOnce(clip, core, trackByCanonical, frameFixDeg);
 	const out = retargetCoreClip(core, clip.name);
 	// In place: センター loses its horizontal path outright; every other exported
 	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
@@ -742,7 +931,12 @@ function depthOf(c: string, parentCache: Map<string, string | null>, guard = 0):
 }
 
 /** One console line per clip: detected profile, scale, and what didn't map. */
-function reportOnce(clip: AnimationClip, core: RetargetCoreContext, trackByCanonical: Map<string, BoneTrack>): void {
+function reportOnce(
+	clip: AnimationClip,
+	core: RetargetCoreContext,
+	trackByCanonical: Map<string, BoneTrack>,
+	frameFixDeg = 0,
+): void {
 	if (reportedClips.has(clip.name)) return;
 	reportedClips.add(clip.name);
 	const profile = isUEMannequinClip(clip) ? 'UE-Mannequin/Unity' : 'Mixamo-style';
@@ -750,6 +944,8 @@ function reportOnce(clip: AnimationClip, core: RetargetCoreContext, trackByCanon
 	const aligned = core.mappedBones.filter(b => b.frameAlign).length;
 	console.log(
 		`[retarget] "${clip.name}": ${profile}, scale=${core.positionScale.toFixed(4)}, ` +
-		`${core.mappedBones.length} mapped (${aligned} aligned), unmapped tracks: ${unmapped.join(', ') || 'none'}`,
+		`${core.mappedBones.length} mapped (${aligned} aligned)` +
+		(frameFixDeg > 0 ? `, world frame corrected ${frameFixDeg.toFixed(0)}°` : '') +
+		`, unmapped tracks: ${unmapped.join(', ') || 'none'}`,
 	);
 }
