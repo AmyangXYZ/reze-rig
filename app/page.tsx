@@ -272,7 +272,7 @@ export default function Home() {
   return (
     <div className="fixed inset-0 w-full h-full overflow-hidden touch-none">
       <header className="absolute top-0 left-0 right-0 px-4 md:px-6 py-2 flex items-center gap-2 z-50 w-full select-none flex flex-row justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-8">
           <Link href="/">
             <h1
               className="text-2xl font-light tracking-[0.2em] md:tracking-[0.3em] text-teal-950 uppercase letter-spacing-wider"
@@ -285,6 +285,23 @@ export default function Home() {
               REZE RIG
             </h1>
           </Link>
+          {/* The rest of the family */}
+          <nav className="hidden items-center gap-5 text-base font-medium text-black sm:flex">
+            {[
+              ["Engine", "https://reze.one"],
+              ["Design", "https://reze.design"],
+              ["Studio", "https://reze.studio"],
+            ].map(([label, href]) => (
+              <Link
+                key={label}
+                href={href}
+                target="_blank"
+                className="underline underline-offset-4 transition-colors hover:text-blue-400"
+              >
+                {label}
+              </Link>
+            ))}
+          </nav>
         </div>
 
         <div className="flex items-center gap-3">
@@ -436,19 +453,6 @@ export default function Home() {
         </div>
       )}
 
-      {!loading && (
-        <div className="absolute z-10 left-6 bottom-4">
-          <h1
-            className="text-md text-teal-950"
-            style={{
-              fontFamily: "var(--font-geist-sans)",
-              fontWeight: 400,
-            }}
-          >
-            Powered by [ <Link href="https://github.com/AmyangXYZ/reze-engine" target="_blank" className="text-blue-600 font-medium">Reze Engine</Link> ]
-          </h1>
-        </div>
-      )}
     </div>
   )
 }
