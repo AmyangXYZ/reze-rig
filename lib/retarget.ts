@@ -458,6 +458,11 @@ export function isUEMannequinClip(clip: AnimationClip): boolean {
 	return false;
 }
 
+/** Does this source bone name land on an MMD bone? (Tooling: clip prebaking.) */
+export function mapsToMmdBone(rawName: string): boolean {
+	return BONE_MAP[canonicalizeBoneName(rawName)] !== undefined;
+}
+
 /** Which naming scheme a clip is written in — for the report and the inset. */
 export function detectRigProfile(clip: AnimationClip): string {
 	for (const t of clip.tracks) {
@@ -933,6 +938,7 @@ function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): Retargete
 		// (ratio → 0). Self-scaling, no magic distance threshold.
 		let net = 0;
 		let path = 0;
+		let excursion = 0;
 		if (center && center.positions.length > 1) {
 			const ps = center.positions;
 			const first = ps[0];
@@ -940,9 +946,18 @@ function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): Retargete
 			net = Math.hypot(last.x - first.x, last.z - first.z);
 			for (let i = 1; i < ps.length; i++) {
 				path += Math.hypot(ps[i].x - ps[i - 1].x, ps[i].z - ps[i - 1].z);
+				excursion = Math.max(excursion, Math.hypot(ps[i].x - first.x, ps[i].z - first.z));
 			}
 		}
-		if (path > 1e-6 && net / path < 0.25) {
+		// Ending where it started isn't enough to call a clip stationary: a dance
+		// can roam the whole stage and come home, which reads as cyclic while
+		// plainly travelling. So also ask how far it ever got. A pelvis can shift
+		// about half a leg length with both feet planted; past that the character
+		// stepped somewhere, and pinning it is what the toggle was asked for.
+		const stanceReach = (opts?.targetPositions?.['下半身']?.[1] ?? 0) * 0.5;
+		const cyclic = path > 1e-6 && net / path < 0.25;
+		const stayedPut = stanceReach <= 0 || excursion <= stanceReach;
+		if (cyclic && stayedPut) {
 			return { ...out, positionTracks: out.positionTracks, duration };
 		}
 		positionTracks = out.positionTracks.map((t) => {

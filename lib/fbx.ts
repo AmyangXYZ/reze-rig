@@ -142,12 +142,27 @@ export function animationClipsFromJson(text: string): AnimationClip[] {
 		});
 
 		if (tracks.length === 0 && positionTracks.length === 0) continue;
+		// Optional, and worth carrying: without it the topology falls back to the
+		// canonical humanoid table, which drops any unmapped bone sitting between
+		// two mapped ones (Character Creator's Pelvis, between hip and thighs)
+		// along with the rotation it was folding into its children.
+		let hierarchy: Map<string, BoneHierarchy> | undefined;
+		if (o.hierarchy && typeof o.hierarchy === 'object') {
+			hierarchy = new Map();
+			for (const [boneName, raw] of Object.entries(o.hierarchy as Record<string, unknown>)) {
+				const h = (raw ?? {}) as Record<string, unknown>;
+				hierarchy.set(boneName, {
+					parent: typeof h.parent === 'string' ? h.parent : null,
+					children: Array.isArray(h.children) ? h.children.map(String) : [],
+				});
+			}
+		}
 		clips.push({
 			name,
 			duration,
 			tracks,
 			positionTracks,
-			hierarchy: undefined,
+			hierarchy,
 		});
 	}
 	if (clips.length === 0) {

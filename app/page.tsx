@@ -223,8 +223,10 @@ export default function Home() {
           console.warn("Failed to load UE bind reference (Idle.fbx):", e)
         }
 
-        // Auto-load demo FBX file
-        if (USE_DEFAULT_ASSETS) await loadFBXAndPlay("/fbx/Rumba Dancing.fbx", "Rumba Dancing.vmd")
+        // Demo motion, prebaked from its Character Creator FBX
+        // (scripts/prebake-clip.ts): same clip through the same conversion
+        // path, 9.7MB and 1.8s of parsing lighter.
+        if (USE_DEFAULT_ASSETS) await loadFBXAndPlay("/fbx/dance-graceful.json", "dance-graceful.vmd")
 
         setEngineError(null)
       } catch (error) {
