@@ -34,6 +34,7 @@ Playback preview and the downloaded file share one code path: the converted clip
 | ----------------------------- | -------------------------------------- | ---------------------- |
 | Mixamo                        | `mixamorig:Hips`, `mixamorig:LeftArm`  | Tested                 |
 | UE-Mannequin / Unity Humanoid | `pelvis`, `upperarm_l`, `thigh_l`      | Tested                 |
+| Reallusion Character Creator  | `CC_Base_Hip`, `CC_Base_L_Upperarm`    | Mapped, lightly tested |
 | 3ds Max Biped                 | `Bip001 Pelvis`, `Bip01 L Thigh`       | Mapped, lightly tested |
 
 Any other humanoid rig is worth a try — the retarget math is rig-agnostic, and the naming table is the only part that is rig-specific. The panel in the corner shows the skeleton as parsed, with the rig profile, how many bones mapped and the scale that was measured; bones that mapped draw bright and unmapped ones stay dim. If a rig converts badly, or names go unmapped, open an issue with that line and the file if you can share it.

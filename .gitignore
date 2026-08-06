@@ -46,3 +46,6 @@ scripts/.dump-run.mjs
 # Decompressed HKX JSON (~1.6GB) — regenerate with hkx.py or restore from 6c72f8c
 /public/hkx/
 /public/mmd-skeleton.json
+
+# Test motion files (not distributed)
+/Motion/

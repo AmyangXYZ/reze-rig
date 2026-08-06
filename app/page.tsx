@@ -8,6 +8,7 @@ import {
   buildBindReferenceFromClip,
   createSourcePreview,
   measureTargetPositions,
+  pickMotionClip,
   retargetClips,
   type SourcePreview,
 } from "@/lib/retarget"
@@ -68,7 +69,12 @@ export default function Home() {
     const model = modelRef.current
     if (!engine || !model) return
 
-    const mmdClips = retargetClips(rawClips, {
+    // Files can carry a bind clip beside the motion (Character Creator ships
+    // "0_T-Pose" first) — convert the one that actually animates.
+    const sourceClip = pickMotionClip(rawClips)
+    if (!sourceClip) return
+
+    const mmdClips = retargetClips([sourceClip], {
       bindReference: ueBindRefRef.current,
       targetPositions: targetPositionsRef.current,
       inPlace: inPlaceRef.current,
@@ -84,7 +90,7 @@ export default function Home() {
     setVmdFileName(fileName || clip.name + ".vmd")
     setClipLoaded(true)
     setSourcePreview(
-      createSourcePreview(rawClips[0], {
+      createSourcePreview(sourceClip, {
         bindReference: ueBindRefRef.current,
         targetPositions: targetPositionsRef.current,
       }),

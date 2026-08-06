@@ -161,11 +161,82 @@ const BIPED_TO_MIXAMO: Record<string, string> = {
 	'r finger42': 'RightHandPinky3',
 };
 
+/**
+ * Reallusion Character Creator / iClone (`CC_Base_*`) → canonical Mixamo-style
+ * names. Keys are the part after the `CC_Base_` prefix, lowercased.
+ *
+ * The spine runs Hip → Waist → Spine01 → Spine02, one joint deeper than the
+ * canonical scheme, so Waist takes Spine and the chest lands on Spine2 — the
+ * folding rule that keeps deep bends in the torso. Pelvis (between Hip and the
+ * thighs) and NeckTwist02 stay unmapped and fold into their mapped children,
+ * as do the twist, share, breast, toe-digit and face bones.
+ */
+const CC_TO_MIXAMO: Record<string, string> = {
+	'hip': 'Hips',
+	'waist': 'Spine',
+	'spine01': 'Spine1',
+	'spine02': 'Spine2',
+	'necktwist01': 'Neck',
+	'head': 'Head',
+	'l_clavicle': 'LeftShoulder',
+	'l_upperarm': 'LeftArm',
+	'l_forearm': 'LeftForeArm',
+	'l_hand': 'LeftHand',
+	'r_clavicle': 'RightShoulder',
+	'r_upperarm': 'RightArm',
+	'r_forearm': 'RightForeArm',
+	'r_hand': 'RightHand',
+	'l_thigh': 'LeftUpLeg',
+	'l_calf': 'LeftLeg',
+	'l_foot': 'LeftFoot',
+	'l_toebase': 'LeftToeBase',
+	'r_thigh': 'RightUpLeg',
+	'r_calf': 'RightLeg',
+	'r_foot': 'RightFoot',
+	'r_toebase': 'RightToeBase',
+	'l_thumb1': 'LeftHandThumb1',
+	'l_thumb2': 'LeftHandThumb2',
+	'l_thumb3': 'LeftHandThumb3',
+	'l_index1': 'LeftHandIndex1',
+	'l_index2': 'LeftHandIndex2',
+	'l_index3': 'LeftHandIndex3',
+	'l_mid1': 'LeftHandMiddle1',
+	'l_mid2': 'LeftHandMiddle2',
+	'l_mid3': 'LeftHandMiddle3',
+	'l_ring1': 'LeftHandRing1',
+	'l_ring2': 'LeftHandRing2',
+	'l_ring3': 'LeftHandRing3',
+	'l_pinky1': 'LeftHandPinky1',
+	'l_pinky2': 'LeftHandPinky2',
+	'l_pinky3': 'LeftHandPinky3',
+	'r_thumb1': 'RightHandThumb1',
+	'r_thumb2': 'RightHandThumb2',
+	'r_thumb3': 'RightHandThumb3',
+	'r_index1': 'RightHandIndex1',
+	'r_index2': 'RightHandIndex2',
+	'r_index3': 'RightHandIndex3',
+	'r_mid1': 'RightHandMiddle1',
+	'r_mid2': 'RightHandMiddle2',
+	'r_mid3': 'RightHandMiddle3',
+	'r_ring1': 'RightHandRing1',
+	'r_ring2': 'RightHandRing2',
+	'r_ring3': 'RightHandRing3',
+	'r_pinky1': 'RightHandPinky1',
+	'r_pinky2': 'RightHandPinky2',
+	'r_pinky3': 'RightHandPinky3',
+};
+
 function canonicalizeBoneName(rawName: string): string {
 	const stripped = rawName.replace(/^mixamorig\d*:/i, '').trim();
 	const ueKey = stripped.toLowerCase();
 	const ue = UE_MANNEQUIN_TO_MIXAMO[ueKey];
 	if (ue) return ue;
+	// Reallusion Character Creator: "CC_Base_L_Upperarm".
+	const cc = stripped.match(/^cc_base_(.+)$/i);
+	if (cc) {
+		const mapped = CC_TO_MIXAMO[cc[1].trim().toLowerCase()];
+		if (mapped) return mapped;
+	}
 	// 3ds Max Biped: "Bip001 L Thigh" / "Bip01_Spine1" — strip the Bip prefix,
 	// normalize separators, look up. The bare "Bip001" root stays unmapped.
 	const bip = stripped.match(/^bip\d*[\s_]+(.+)$/i);
@@ -385,6 +456,41 @@ export function isUEMannequinClip(clip: AnimationClip): boolean {
 		if (UE_DISTINCTIVE_NAMES.has(stripped)) return true;
 	}
 	return false;
+}
+
+/** Which naming scheme a clip is written in — for the report and the inset. */
+export function detectRigProfile(clip: AnimationClip): string {
+	for (const t of clip.tracks) {
+		if (/^cc_base_/i.test(t.name)) return 'Character Creator';
+		if (/^bip\d*[\s_]/i.test(t.name)) return 'Biped';
+		if (/^mixamorig\d*:/i.test(t.name)) return 'Mixamo';
+	}
+	return isUEMannequinClip(clip) ? 'UE / Unity' : 'Mixamo-style';
+}
+
+/**
+ * The clip a file is actually about. Character Creator and Max exports ship a
+ * bind clip beside the motion ("0_T-Pose", one key at t=0) and it sorts first,
+ * so taking clips[0] converts a statue. Longest span wins; a single-clip file
+ * is unaffected.
+ */
+export function pickMotionClip(clips: AnimationClip[]): AnimationClip | null {
+	let best: AnimationClip | null = null;
+	let bestSpan = -1;
+	for (const clip of clips) {
+		let span = clip.duration > 0 ? clip.duration : 0;
+		if (span <= 0) {
+			for (const t of clip.tracks) {
+				const last = t.times[t.times.length - 1] ?? 0;
+				if (last > span) span = last;
+			}
+		}
+		if (span > bestSpan) {
+			bestSpan = span;
+			best = clip;
+		}
+	}
+	return best;
 }
 
 /** Extract a canonical-bone-name → BoneRestPose map from a clip whose first frame is the bind. */
@@ -895,7 +1001,7 @@ export function createSourcePreview(clip: AnimationClip, opts?: RetargetOptions)
 
 	const unmapped = [...trackByCanonical.keys()].filter(c => !BONE_MAP[c] && c !== 'Root' && c !== 'Spine1');
 	const info: SourcePreviewInfo = {
-		profile: isUEMannequinClip(clip) ? 'UE / Unity' : 'Mixamo',
+		profile: detectRigProfile(clip),
 		mappedCount: core.mappedBones.length,
 		alignedCount: core.mappedBones.filter(b => b.frameAlign).length,
 		scale: core.positionScale,
@@ -939,7 +1045,7 @@ function reportOnce(
 ): void {
 	if (reportedClips.has(clip.name)) return;
 	reportedClips.add(clip.name);
-	const profile = isUEMannequinClip(clip) ? 'UE-Mannequin/Unity' : 'Mixamo-style';
+	const profile = detectRigProfile(clip);
 	const unmapped = [...trackByCanonical.keys()].filter(c => !BONE_MAP[c] && c !== 'Root' && c !== 'Spine1');
 	const aligned = core.mappedBones.filter(b => b.frameAlign).length;
 	console.log(

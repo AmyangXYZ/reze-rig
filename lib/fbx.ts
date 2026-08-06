@@ -151,9 +151,27 @@ export function animationClipsFromJson(text: string): AnimationClip[] {
 		});
 	}
 	if (clips.length === 0) {
+		if (looksLikeReallusionSidecar(parsed)) {
+			throw new Error('That JSON is Character Creator\'s material sidecar, not animation — upload the .fbx beside it.');
+		}
 		throw new Error('Animation JSON contained no tracks');
 	}
 	return clips;
+}
+
+/**
+ * Reallusion Character Creator / iClone write a material-and-physics sidecar
+ * named after the FBX, which reads as "the skeleton must be in the JSON". It
+ * isn't: the FBX carries the whole rig, and this file is for material import.
+ */
+function looksLikeReallusionSidecar(parsed: unknown): boolean {
+	if (!parsed || typeof parsed !== 'object') return false;
+	for (const value of Object.values(parsed as Record<string, unknown>)) {
+		if (!value || typeof value !== 'object') continue;
+		const o = value as Record<string, unknown>;
+		if ('Object' in o && ('Version' in o || 'Scene' in o)) return true;
+	}
+	return false;
 }
 
 export class FBXReaderNode {
