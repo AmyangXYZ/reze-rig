@@ -923,17 +923,17 @@ function usableSkinBind(
 	clip: AnimationClip,
 	order: string[],
 	trackByCanonical: Map<string, BoneTrack>,
-	parentCache: Map<string, string | null>,
 ): Map<string, number[]> | null {
 	const skin = clip.bindPoses;
 	if (!skin || skin.size === 0) return null;
+	// Only MAPPED bones need a true bind: theirs is what the delta and the
+	// alignment are measured from. An unmapped ancestor without one is harmless,
+	// because a descendant that has one is placed from its own matrix and the
+	// ancestor's error is absorbed into the local between them.
 	for (const c of order) {
 		if (!BONE_MAP[c]) continue;
-		for (let node: string | null = c; node; node = parentCache.get(node) ?? null) {
-			const raw = trackByCanonical.get(node)?.name;
-			if (!raw) continue; // a name from the fallback table, with no node of its own
-			if (!skin.has(raw)) return null;
-		}
+		const raw = trackByCanonical.get(c)?.name;
+		if (raw && !skin.has(raw)) return null;
 	}
 	return skin;
 }
@@ -1013,7 +1013,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 	// would put true and false poses in one hierarchy, which is worse than
 	// either alone. Bones off that chain cannot affect a mapped bone's world
 	// transform, so gaps there are harmless.
-	const skinBind = usableSkinBind(clip, order, trackByCanonical, parentCache);
+	const skinBind = usableSkinBind(clip, order, trackByCanonical);
 	const bindWorld = new Map<string, Mat4>();
 
 	const bones: FbxSourceBone[] = [];
