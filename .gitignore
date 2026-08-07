@@ -49,3 +49,6 @@ scripts/.dump-run.mjs
 
 # Test motion files (not distributed)
 /Motion/
+
+# User-reported problem files (not distributed)
+/public/fbx/issue/

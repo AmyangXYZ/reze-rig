@@ -125,17 +125,28 @@ export const SourceInset = memo(function SourceInset({
   }, [preview, modelRef])
 
   const info = preview.info
-  const report =
-    `${info.profile} · ${info.mappedCount} bones` +
-    (info.unmapped.length > 0 ? ` · ${info.unmapped.length} unmapped` : "")
+  const report = info.bindMissing
+    ? `${info.profile} · bind pose missing`
+    : `${info.profile} · ${info.mappedCount} bones` +
+      (info.unmapped.length > 0 ? ` · ${info.unmapped.length} unmapped` : "")
   const fullReport = `${report} · scale ${info.scale.toFixed(3)}` +
     (info.unmapped.length > 0 ? `\nunmapped: ${info.unmapped.join(", ")}` : "")
   return (
     <div className="pointer-events-auto w-[320px] select-none overflow-hidden rounded-lg border border-white/10 bg-zinc-950/70 backdrop-blur-xs">
       <div className="flex items-center gap-2 overflow-hidden px-3 py-1.5" title={fullReport}>
         <span className="shrink-0 text-[10px] uppercase tracking-wider text-white/40">Source</span>
-        <span className="overflow-hidden whitespace-nowrap font-mono text-[11px] text-white/60">{report}</span>
+        <span
+          className={`overflow-hidden whitespace-nowrap font-mono text-[11px] ${info.bindMissing ? "text-amber-300" : "text-white/60"}`}
+        >
+          {report}
+        </span>
       </div>
+      {info.bindMissing && (
+        <p className="px-3 pb-2 text-[11px] leading-snug text-amber-300/80">
+          Its rest pose is just frame 1, so the rig&apos;s real bind is missing. Drop the pack&apos;s T-pose file — a
+          still, single-frame FBX — to convert correctly.
+        </p>
+      )}
       <canvas
         ref={canvasRef}
         style={{ width: W, height: H }}

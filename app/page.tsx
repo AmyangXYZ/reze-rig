@@ -44,6 +44,9 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const ueBindRefRef = useRef<Map<string, BoneRestPose> | null>(null)
+  /** A T-pose file the user dropped: some packs ship the bind separately
+   *  because their motion files carry frame 0 as the rest pose. */
+  const userBindRefRef = useRef<Map<string, BoneRestPose> | null>(null)
   /** Target model's bind-pose bone positions, re-measured on every model swap. */
   const targetPositionsRef = useRef<Record<string, [number, number, number]> | null>(null)
   /** Engine registry key of the currently loaded model (for removeModel on swap). */
@@ -75,7 +78,9 @@ export default function Home() {
     if (!sourceClip) return
 
     const mmdClips = retargetClips([sourceClip], {
-      bindReference: ueBindRefRef.current,
+      // Offer both: the bundled UE bind and whatever T-pose was dropped. Only
+      // the one built from this clip's own rig is used.
+      bindReference: [userBindRefRef.current, ueBindRefRef.current].filter((r) => r !== null),
       targetPositions: targetPositionsRef.current,
       inPlace: inPlaceRef.current,
     })
@@ -91,7 +96,7 @@ export default function Home() {
     setClipLoaded(true)
     setSourcePreview(
       createSourcePreview(sourceClip, {
-        bindReference: ueBindRefRef.current,
+        bindReference: [userBindRefRef.current, ueBindRefRef.current].filter((r) => r !== null),
         targetPositions: targetPositionsRef.current,
       }),
     )
@@ -107,6 +112,18 @@ export default function Home() {
       const rawClips = isJson
         ? await fbxLoader.loadJsonAsync(fbxUrl)
         : await fbxLoader.loadAsync(fbxUrl)
+
+      // A file with no motion in it is a bind pose, not a clip to convert:
+      // keep it as this rig's reference and re-convert whatever is loaded.
+      // Packs whose motions carry frame 0 as their rest pose ship it this way.
+      const motion = pickMotionClip(rawClips)
+      const still = !motion || motion.tracks.every((t) => t.times.length <= 1)
+      if (still && motion) {
+        userBindRefRef.current = buildBindReferenceFromClip(motion)
+        const previous = lastSourceRef.current
+        if (previous) await convertAndPlay(previous.clips, previous.fileName)
+        return
+      }
 
       lastSourceRef.current = { clips: rawClips, fileName }
       await convertAndPlay(rawClips, fileName)

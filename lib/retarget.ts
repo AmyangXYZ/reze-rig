@@ -1,4 +1,5 @@
 import { Quat, Vec3 } from 'reze-engine';
+import { bindQuatFromBoneRestPose } from './fbx';
 import type { AnimationClip, BoneRestPose, BoneTrack } from './fbx';
 import {
 	createCoreContext,
@@ -505,8 +506,86 @@ export function buildBindReferenceFromClip(clip: AnimationClip): Map<string, Bon
 		if (!t.restPose) continue;
 		const c = canonicalizeBoneName(t.name);
 		if (!map.has(c)) map.set(c, t.restPose);
+		// The raw name too, so a reference can be recognised as belonging to this
+		// rig. Canonicalization deliberately erases which rig a name came from —
+		// "Bip001 L Thigh" and "thigh_l" both become LeftUpLeg — so the canonical
+		// keys alone cannot tell a matching bind from a foreign one.
+		if (!map.has(t.name)) map.set(t.name, t.restPose);
 	}
 	return map;
+}
+
+/**
+ * Does this bind reference describe the same rig as the clip? Raw bone names
+ * are the evidence: a reference built from the pack's own T-pose repeats them
+ * exactly, while a reference from another rig shares none of them however
+ * similar the two skeletons are once canonicalized.
+ */
+function bindReferenceMatchesRig(clip: AnimationClip, reference: Map<string, BoneRestPose>): boolean {
+	let mapped = 0;
+	let found = 0;
+	let compared = 0;
+	let sameLength = 0;
+	for (const t of clip.tracks) {
+		if (!mapsToMmdBone(t.name)) continue;
+		mapped++;
+		const ref = reference.get(t.name);
+		if (!ref) continue;
+		found++;
+		// Bone offsets describe the skeleton rather than the pose, so they stay
+		// trustworthy even in a file whose rest rotations are its first frame.
+		const mine = t.restPose?.lclTranslation;
+		const theirs = ref.lclTranslation;
+		if (!mine || !theirs) continue;
+		const a = Math.hypot(mine[0], mine[1], mine[2]);
+		const b = Math.hypot(theirs[0], theirs[1], theirs[2]);
+		if (Math.max(a, b) < 1e-6) continue;
+		compared++;
+		if (Math.abs(a - b) / Math.max(a, b) <= 0.05) sameLength++;
+	}
+	if (mapped === 0 || found / mapped < 0.5) return false;
+	// Names alone only identify the rig FAMILY: every 3ds Max Biped calls its
+	// hip "Bip001 Pelvis", every Character Creator rig uses CC_Base_*, every UE
+	// rig uses pelvis/thigh_l. A bind from one character would otherwise be
+	// applied to another's motion and quietly retarget it with the wrong
+	// proportions. Bone lengths are the skeleton's fingerprint — within one
+	// character they agree to a fraction of a percent.
+	return compared === 0 || sameLength / compared >= 0.9;
+}
+
+/** The supplied reference that belongs to this clip's rig, if any. Several may
+ *  be offered — a bundled one and whatever the user dropped — and only the one
+ *  built from the same skeleton may be used. */
+function pickBindReference(clip: AnimationClip, opts?: RetargetOptions): Map<string, BoneRestPose> | null {
+	const ref = opts?.bindReference;
+	if (!ref) return null;
+	const candidates = Array.isArray(ref) ? ref : [ref];
+	return candidates.find((c) => bindReferenceMatchesRig(clip, c)) ?? null;
+}
+
+/**
+ * A rest pose that simply repeats the clip's first frame — what several
+ * exporters write when a motion is saved without its figure pose. It is not a
+ * bind at all, so "delta from rest" measures from wherever the animation
+ * happened to start: alignment collapses, and the hip height it implies throws
+ * the translation scale out with it. The true pose cannot be recovered from
+ * such a file (its Pre/Post rotations alone describe no usable pose either),
+ * so this is reported rather than repaired — the pack's T-pose file supplies it.
+ */
+export function restPoseIsFirstFrame(clip: AnimationClip): boolean {
+	let checked = 0;
+	let matching = 0;
+	for (const t of clip.tracks) {
+		if (!t.restPose || t.quats.length === 0 || !mapsToMmdBone(t.name)) continue;
+		const rest = bindQuatFromBoneRestPose(t.restPose);
+		if (!rest) continue;
+		checked++;
+		const q = t.quats[0];
+		const dot = Math.abs(rest.x * q.x + rest.y * q.y + rest.z * q.z + rest.w * q.w);
+		if (dot > 0.9999) matching++;
+	}
+	// Every mapped bone agreeing to four decimals is a copy, not a coincidence.
+	return checked >= 8 && matching === checked;
 }
 
 /* ============================================================================
@@ -541,7 +620,7 @@ export interface RetargetOptions {
 	 * baseline. Build this from a known-good clip (an idle, or the rig's
 	 * bind/T-pose file). Applied only when the clip looks UE/Unity-shaped.
 	 */
-	bindReference?: Map<string, BoneRestPose> | null;
+	bindReference?: Map<string, BoneRestPose> | Map<string, BoneRestPose>[] | null;
 	/**
 	 * The target MMD model's bind-pose world positions keyed by MMD bone name
 	 * (PMX units), measured from the loaded model. Enables absolute segment
@@ -763,7 +842,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 	// reference on a Mixamo clip (or vice versa) would corrupt the bind because the
 	// two encode bind orientation differently (Mixamo: Pre/Post + identity Lcl;
 	// UE: large Lcl, no Pre/Post).
-	const bindRef = opts?.bindReference && isUEMannequinClip(clip) ? opts.bindReference : null;
+	const bindRef = pickBindReference(clip, opts);
 
 	// First track per canonical name (raw FBX may have e.g. mixamorig:Hips and a
 	// duplicate model node).
@@ -920,7 +999,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
 	const { core, trackByCanonical, duration, frameFixDeg } = buildFbxCore(clip, opts);
-	reportOnce(clip, core, trackByCanonical, frameFixDeg);
+	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts);
 	const out = retargetCoreClip(core, clip.name);
 	// In place: センター loses its horizontal path outright; every other exported
 	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
@@ -991,6 +1070,9 @@ export interface SourcePreviewInfo {
 	alignedCount: number
 	scale: number
 	unmapped: string[]
+	/** The file's rest pose is a copy of its first frame and no matching bind
+	 *  reference was supplied — see restPoseIsFirstFrame. */
+	bindMissing: boolean
 }
 
 export interface SourcePreview {
@@ -1021,6 +1103,7 @@ export function createSourcePreview(clip: AnimationClip, opts?: RetargetOptions)
 		alignedCount: core.mappedBones.filter(b => b.frameAlign).length,
 		scale: core.positionScale,
 		unmapped,
+		bindMissing: restPoseIsFirstFrame(clip) && !pickBindReference(clip, opts),
 	};
 
 	const n = source.bones.length;
@@ -1057,6 +1140,7 @@ function reportOnce(
 	core: RetargetCoreContext,
 	trackByCanonical: Map<string, BoneTrack>,
 	frameFixDeg = 0,
+	opts?: RetargetOptions,
 ): void {
 	if (reportedClips.has(clip.name)) return;
 	reportedClips.add(clip.name);
@@ -1066,6 +1150,9 @@ function reportOnce(
 	console.log(
 		`[retarget] "${clip.name}": ${profile}, scale=${core.positionScale.toFixed(4)}, ` +
 		`${core.mappedBones.length} mapped (${aligned} aligned)` +
+		(restPoseIsFirstFrame(clip) && !pickBindReference(clip, opts)
+			? ', REST POSE IS FRAME 0 — supply the rig\'s T-pose file for a correct bind'
+			: '') +
 		(frameFixDeg > 0 ? `, world frame corrected ${frameFixDeg.toFixed(0)}°` : '') +
 		`, unmapped tracks: ${unmapped.join(', ') || 'none'}`,
 	);
