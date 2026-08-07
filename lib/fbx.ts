@@ -29,6 +29,14 @@ export interface AnimationClip {
 	tracks: BoneTrack[];
 	positionTracks: PositionTrack[];
 	hierarchy?: Map<string, BoneHierarchy>;  // Bone name -> hierarchy info
+	/**
+	 * Bone name → its WORLD transform when the mesh was skinned, as a 16-float
+	 * column-major matrix (FBX `TransformLink` on each skin cluster). This is the
+	 * skeleton's true bind pose, and unlike the Model nodes' rest properties it
+	 * survives an exporter that writes the current frame as the rest pose.
+	 * Present only for files that ship a skinned mesh.
+	 */
+	bindPoses?: Map<string, number[]>;
 }
 
 export interface BoneRestPose {
@@ -518,14 +526,74 @@ class AnimationParser {
 
 		// Build bone hierarchy from Connections
 		const hierarchy = this.buildBoneHierarchy(tracks.map(t => t.name));
+		const bindPoses = this.extractBindPoses();
 
 		return {
 			name,
 			duration: -1,
 			tracks,
 			positionTracks,
-			hierarchy
+			hierarchy,
+			bindPoses: bindPoses.size > 0 ? bindPoses : undefined
 		};
+	}
+
+	/**
+	 * Bind-pose world matrices from the skin. Each cluster binds one bone to the
+	 * mesh and records `TransformLink`, that bone's world transform at bind time —
+	 * the authoritative bind, written when the character was skinned rather than
+	 * when this clip was exported.
+	 */
+	private extractBindPoses(): Map<string, number[]> {
+		const out = new Map<string, number[]>();
+		const objects = this.reader.node('Objects');
+		if (!objects) return out;
+
+		const modelName = new Map<number, string>();
+		for (const m of objects.nodes('Model')) {
+			const id = m.prop(0, 'number');
+			const name = m.prop(1, 'string');
+			if (id !== undefined && name) modelName.set(id, name);
+		}
+
+		// A bone Model connects INTO its cluster: C: "OO", boneId, clusterId.
+		const boneOfCluster = new Map<number, string>();
+		for (const c of this.reader.node('Connections')?.nodes('C') ?? []) {
+			if (c.prop(0, 'string') !== 'OO') continue;
+			const from = c.prop(1, 'number');
+			const to = c.prop(2, 'number');
+			if (from === undefined || to === undefined) continue;
+			const name = modelName.get(from);
+			if (name && !boneOfCluster.has(to)) boneOfCluster.set(to, name);
+		}
+
+		for (const d of objects.nodes('Deformer')) {
+			if (d.prop(2, 'string') !== 'Cluster') continue;
+			const id = d.prop(0, 'number');
+			if (id === undefined) continue;
+			const bone = boneOfCluster.get(id);
+			const link = d.fbxNode.nodes.find(n => n.name === 'TransformLink');
+			const m = link?.props[0];
+			if (bone && Array.isArray(m) && m.length === 16 && !out.has(bone)) {
+				out.set(bone, m as number[]);
+			}
+		}
+
+		// A BindPose node records the same thing for files that ship no skin —
+		// an animation-only export can still carry one, and it covers every node
+		// rather than only those the mesh happens to be weighted to.
+		for (const pose of objects.nodes('Pose')) {
+			if (pose.prop(2, 'string') !== 'BindPose') continue;
+			for (const entry of pose.fbxNode.nodes) {
+				if (entry.name !== 'PoseNode') continue;
+				const nodeId = entry.nodes.find(n => n.name === 'Node')?.props[0];
+				const matrix = entry.nodes.find(n => n.name === 'Matrix')?.props[0];
+				if (typeof nodeId !== 'number' || !Array.isArray(matrix) || matrix.length !== 16) continue;
+				const bone = modelName.get(nodeId);
+				if (bone && !out.has(bone)) out.set(bone, matrix as number[]);
+			}
+		}
+		return out;
 	}
 
 	private buildBoneHierarchy(boneNames: string[]): Map<string, BoneHierarchy> {

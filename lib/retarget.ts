@@ -824,6 +824,120 @@ function measureFrameFix(
 	return residual <= FRAME_FIX_TOLERANCE_DEG ? { q: snapped, deg } : null;
 }
 
+/* ============================================================================
+ * Bind pose from the skin (FBX TransformLink).
+ * ========================================================================= */
+
+/** Column-major 4x4, translation at 12..14 — the layout FBX writes. */
+type Mat4 = number[];
+
+const MAT4_IDENTITY: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+function mat4Mul(a: Mat4, b: Mat4): Mat4 {
+	const out = new Array<number>(16);
+	for (let col = 0; col < 4; col++) {
+		for (let row = 0; row < 4; row++) {
+			out[col * 4 + row] =
+				a[row] * b[col * 4] +
+				a[4 + row] * b[col * 4 + 1] +
+				a[8 + row] * b[col * 4 + 2] +
+				a[12 + row] * b[col * 4 + 3];
+		}
+	}
+	return out;
+}
+
+/** Inverse of a rotation+scale+translation matrix (no projection). */
+function mat4InvertAffine(m: Mat4): Mat4 {
+	const a = m[0], b = m[4], c = m[8];
+	const d = m[1], e = m[5], f = m[9];
+	const g = m[2], h = m[6], i = m[10];
+	const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+	if (Math.abs(det) < 1e-12) return MAT4_IDENTITY.slice();
+	const s = 1 / det;
+	const r = [
+		(e * i - f * h) * s, (f * g - d * i) * s, (d * h - e * g) * s,
+		(c * h - b * i) * s, (a * i - c * g) * s, (b * g - a * h) * s,
+		(b * f - c * e) * s, (c * d - a * f) * s, (a * e - b * d) * s,
+	];
+	const tx = m[12], ty = m[13], tz = m[14];
+	return [
+		r[0], r[1], r[2], 0,
+		r[3], r[4], r[5], 0,
+		r[6], r[7], r[8], 0,
+		-(r[0] * tx + r[3] * ty + r[6] * tz),
+		-(r[1] * tx + r[4] * ty + r[7] * tz),
+		-(r[2] * tx + r[5] * ty + r[8] * tz),
+		1,
+	];
+}
+
+/** Rotation part as a quaternion, with any scale divided out. */
+function mat4ToQuat(m: Mat4): Q4 {
+	const sx = Math.hypot(m[0], m[1], m[2]) || 1;
+	const sy = Math.hypot(m[4], m[5], m[6]) || 1;
+	const sz = Math.hypot(m[8], m[9], m[10]) || 1;
+	const m00 = m[0] / sx, m10 = m[1] / sx, m20 = m[2] / sx;
+	const m01 = m[4] / sy, m11 = m[5] / sy, m21 = m[6] / sy;
+	const m02 = m[8] / sz, m12 = m[9] / sz, m22 = m[10] / sz;
+	const trace = m00 + m11 + m22;
+	let x: number, y: number, z: number, w: number;
+	if (trace > 0) {
+		const t = Math.sqrt(trace + 1) * 2;
+		w = 0.25 * t; x = (m21 - m12) / t; y = (m02 - m20) / t; z = (m10 - m01) / t;
+	} else if (m00 > m11 && m00 > m22) {
+		const t = Math.sqrt(1 + m00 - m11 - m22) * 2;
+		w = (m21 - m12) / t; x = 0.25 * t; y = (m01 + m10) / t; z = (m02 + m20) / t;
+	} else if (m11 > m22) {
+		const t = Math.sqrt(1 + m11 - m00 - m22) * 2;
+		w = (m02 - m20) / t; x = (m01 + m10) / t; y = 0.25 * t; z = (m12 + m21) / t;
+	} else {
+		const t = Math.sqrt(1 + m22 - m00 - m11) * 2;
+		w = (m10 - m01) / t; x = (m02 + m20) / t; y = (m12 + m21) / t; z = 0.25 * t;
+	}
+	return q4Normalize([x, y, z, w]);
+}
+
+function mat4FromQuatPos(q: Q4, p: V3): Mat4 {
+	const [x, y, z, w] = q;
+	const x2 = x + x, y2 = y + y, z2 = z + z;
+	const xx = x * x2, xy = x * y2, xz = x * z2;
+	const yy = y * y2, yz = y * z2, zz = z * z2;
+	const wx = w * x2, wy = w * y2, wz = w * z2;
+	return [
+		1 - (yy + zz), xy + wz, xz - wy, 0,
+		xy - wz, 1 - (xx + zz), yz + wx, 0,
+		xz + wy, yz - wx, 1 - (xx + yy), 0,
+		p[0], p[1], p[2], 1,
+	];
+}
+
+/**
+ * The skin's bind matrices, but only if they cover every bone between a mapped
+ * bone and the root. Partial coverage is refused rather than patched: rigs that
+ * deform through twist helpers leave their calves and forearms unskinned, and
+ * filling those gaps from a rest pose that is really frame 1 would put a true
+ * bind and a false one in the same chain.
+ */
+function usableSkinBind(
+	clip: AnimationClip,
+	order: string[],
+	trackByCanonical: Map<string, BoneTrack>,
+	parentCache: Map<string, string | null>,
+): Map<string, number[]> | null {
+	const skin = clip.bindPoses;
+	if (!skin || skin.size === 0) return null;
+	for (const c of order) {
+		if (!BONE_MAP[c]) continue;
+		for (let node: string | null = c; node; node = parentCache.get(node) ?? null) {
+			const raw = trackByCanonical.get(node)?.name;
+			if (!raw) continue; // a name from the fallback table, with no node of its own
+			if (!skin.has(raw)) return null;
+		}
+	}
+	return skin;
+}
+
 interface FbxCore {
 	source: RetargetSource
 	core: RetargetCoreContext
@@ -893,6 +1007,15 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (!positionTrackByCanonical.has(c)) positionTrackByCanonical.set(c, { times: p.times, positions: p.positions });
 	}
 
+	// The skin's bind, when the file ships one and it covers every bone on a path
+	// from a mapped bone to the root. All-or-nothing on that chain: a bind taken
+	// partly from the skin and partly from a rest pose that is really frame 1
+	// would put true and false poses in one hierarchy, which is worse than
+	// either alone. Bones off that chain cannot affect a mapped bone's world
+	// transform, so gaps there are harmless.
+	const skinBind = usableSkinBind(clip, order, trackByCanonical, parentCache);
+	const bindWorld = new Map<string, Mat4>();
+
 	const bones: FbxSourceBone[] = [];
 	const idxByCanonical = new Map<string, number>();
 	for (const c of order) {
@@ -900,7 +1023,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		const rest = bindRef?.get(c) ?? track?.restPose ?? null;
 		const pre = preQuat(rest);
 		const postInv = postQuatInv(rest);
-		const bindLocal = applyPrePost(lclBindQuat(rest), pre, postInv);
+		let bindLocal = applyPrePost(lclBindQuat(rest), pre, postInv);
 		const parent = parentCache.get(c) ?? null;
 		const pos = positionTrackByCanonical.get(c) ?? null;
 		// Mixamo omits rest translations for zero-rotation joints — including Hips.
@@ -908,7 +1031,26 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		// bind" equal the ABSOLUTE world position (~100cm × scale: the model
 		// launches upward and sideways). For a bone with a position track, its
 		// first sample is the baseline: the clip starts at the model's own spot.
-		const bindT = rest?.lclTranslation ?? pos?.positions[0] ?? null;
+		let bindT = rest?.lclTranslation ?? pos?.positions[0] ?? null;
+
+		if (skinBind) {
+			// World bind from the skin where it exists; otherwise carry the chain
+			// forward with this bone's own rest local, so a descendant that does
+			// have one still re-anchors to the truth.
+			const parentWorld = parent !== null ? bindWorld.get(parent) ?? MAT4_IDENTITY : MAT4_IDENTITY;
+			const raw = track?.name;
+			const own = raw ? skinBind.get(raw) : undefined;
+			const world = own ?? mat4Mul(parentWorld, mat4FromQuatPos(
+				[bindLocal.x, bindLocal.y, bindLocal.z, bindLocal.w],
+				bindT ?? [0, 0, 0],
+			));
+			bindWorld.set(c, world);
+			const local = mat4Mul(mat4InvertAffine(parentWorld), world);
+			const q = mat4ToQuat(local);
+			bindLocal = new Quat(q[0], q[1], q[2], q[3]);
+			bindT = [local[12], local[13], local[14]];
+		}
+
 		idxByCanonical.set(c, bones.length);
 		bones.push({
 			name: c,
