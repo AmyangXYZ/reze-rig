@@ -55,7 +55,7 @@ function main(): void {
   const inputs: string[] = []
   let outDir: string | null = null
   let inPlace = false
-  let footIK = false
+  let footIK = true // matches the site; --no-foot-ik opts out
   let bindRefPath: string | null = null
   let noBindRef = false
   let targetPmxPath: string | null = null

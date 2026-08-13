@@ -24,7 +24,7 @@ The retargeter expresses each source bone's animation as a world-orientation del
 - **Segment alignment for any bind pose.** For every mapped bone, the same anatomical segment (bone → its mapped child) is measured on both skeletons' bind poses, and a shortest-arc swing maps one onto the other. T-pose, A-pose, and relaxed binds all convert the same way — arms, legs, feet, spine, and fingers included.
 - **The target model is measured, not assumed.** Bone positions are read from the loaded PMX at bind, so alignment and proportions adapt to whatever model is in the viewport. Upload your own model as a zip (a picker appears when the zip holds several `.pmx` files) and the loaded motion re-retargets to it on the spot.
 - **Translation scale from the skeletons themselves.** The hip-height ratio between source and target scales root motion — centimeter, meter, and inch exports all land correctly, including Mixamo characters with different rig sizes.
-- **Correct IK data.** The exported VMD carries per-chain IK frames disabling the six leg chains, since the converted motion drives every leg bone directly.
+- **Feet are placed, not derived.** Two skeletons never share proportions — a source's legs may be 95% of its hip height against a model's 79% — so reproducing joint angles faithfully lands the feet somewhere else, which reads as sliding. The VMD drives 左足ＩＫ / 右足ＩＫ with the source's own foot positions, the way MMD motions normally work, so the result adapts to other models too; the remaining chains carry IK-disable frames.
 - **Bind-reference override for broken exports.** Some Unity per-pose clips embed the first animation frame as their rest pose instead of the real bind. When such a clip is detected, the canonical bind from an idle clip stands in, so "delta from rest" references the right baseline.
 
 Playback preview and the downloaded file share one code path: the converted clip loads into the engine's animation system directly and `exportVmd` serializes exactly what you watched. **In Place** strips horizontal root motion the way Mixamo's option does, keeping the vertical so jumps and crouches survive.
@@ -56,6 +56,6 @@ Directories are scanned recursively; each clip writes `<out>/<basename>.vmd`.
 | `--out <dir>`         | Output directory                                                         |
 | `--target-pmx <file>` | Measure this model as the retarget target                                |
 | `--in-place`          | Strip horizontal root motion                                             |
-| `--foot-ik`           | Export foot-IK targets so the model's own IK plants the feet             |
+| `--no-foot-ik`        | Drive the legs by FK instead of exporting foot-IK targets                |
 | `--bind-ref <file>`   | Anchor per-pose exports to this clip's bind (defaults to an `Idle.fbx` among the inputs) |
 | `--no-bind-ref`       | Use each clip's own rest pose                                            |

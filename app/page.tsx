@@ -83,6 +83,12 @@ export default function Home() {
       bindReference: [userBindRefRef.current, ueBindRefRef.current].filter((r) => r !== null),
       targetPositions: targetPositionsRef.current,
       inPlace: inPlaceRef.current,
+      // Feet are PLACED rather than derived from joint angles. Two skeletons
+      // never share proportions — this model's legs are 79% of its hip height
+      // against a typical source's 95% — and reproducing angles faithfully then
+      // lands the feet somewhere else, which reads as sliding. Driving 足ＩＫ is
+      // also what MMD motions normally do, so the result adapts to other models.
+      footIK: true,
     })
     if (mmdClips.length === 0) return
 

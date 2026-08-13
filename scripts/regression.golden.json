@@ -1,0 +1,102 @@
+{
+  "public/fbx/Rumba Dancing.fbx": {
+    "profile": "Mixamo",
+    "mapped": 51,
+    "aligned": 48,
+    "scale": 0.1314,
+    "bindMissing": false,
+    "frames": 72,
+    "rotationSum": 4498.6005,
+    "translationSum": -31.6567
+  },
+  "public/fbx/Snake Hip Hop Dance.fbx": {
+    "profile": "Mixamo",
+    "mapped": 51,
+    "aligned": 48,
+    "scale": 0.1314,
+    "bindMissing": false,
+    "frames": 459,
+    "rotationSum": 28586.0892,
+    "translationSum": -3500.7415
+  },
+  "public/fbx/Taunt.fbx": {
+    "profile": "Mixamo",
+    "mapped": 51,
+    "aligned": 48,
+    "scale": 0.1314,
+    "bindMissing": false,
+    "frames": 86,
+    "rotationSum": 6030.0002,
+    "translationSum": -268.5315
+  },
+  "public/fbx/Arms Down.fbx": {
+    "profile": "Mixamo",
+    "mapped": 51,
+    "aligned": 48,
+    "scale": 0.1314,
+    "bindMissing": false,
+    "frames": 2,
+    "rotationSum": 124.8532,
+    "translationSum": 3.386
+  },
+  "public/fbx/Idle.fbx": {
+    "profile": "UE / Unity",
+    "mapped": 51,
+    "aligned": 47,
+    "scale": 0.1398,
+    "bindMissing": false,
+    "frames": 91,
+    "rotationSum": 4986.9764,
+    "translationSum": -21.9225
+  },
+  "public/fbx/Run_Lfoot.fbx": {
+    "profile": "UE / Unity",
+    "mapped": 51,
+    "aligned": 47,
+    "scale": 0.1398,
+    "bindMissing": false,
+    "frames": 21,
+    "rotationSum": 1562.2928,
+    "translationSum": -1264.8818
+  },
+  "public/fbx/Run_Start_L0.fbx": {
+    "profile": "UE / Unity",
+    "mapped": 51,
+    "aligned": 47,
+    "scale": 0.1398,
+    "bindMissing": false,
+    "frames": 35,
+    "rotationSum": 2499.3606,
+    "translationSum": -628.7176
+  },
+  "public/fbx/Run_Start_R180.fbx": {
+    "profile": "UE / Unity",
+    "mapped": 51,
+    "aligned": 47,
+    "scale": 0.1398,
+    "bindMissing": false,
+    "frames": 35,
+    "rotationSum": 2494.9128,
+    "translationSum": 650.0582
+  },
+  "public/fbx/Run_Stop_Lfoot.fbx": {
+    "profile": "UE / Unity",
+    "mapped": 51,
+    "aligned": 47,
+    "scale": 0.1398,
+    "bindMissing": false,
+    "frames": 67,
+    "rotationSum": 4515.1498,
+    "translationSum": -6151.9551
+  },
+  "public/fbx/dance-graceful.json": {
+    "profile": "Character Creator",
+    "mapped": 51,
+    "aligned": 47,
+    "scale": 0.1497,
+    "bindMissing": false,
+    "frames": 697,
+    "rotationSum": 45500.5368,
+    "translationSum": -612.2785
+  }
+}
