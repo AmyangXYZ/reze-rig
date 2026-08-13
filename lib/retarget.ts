@@ -945,6 +945,8 @@ interface FbxCore {
 	duration: number
 	/** Global frame correction applied to the source, in degrees (0 = none). */
 	frameFixDeg: number
+	/** The file carried its own bind (skin clusters or a BindPose node). */
+	bindFromFile: boolean
 }
 
 /** Parse one clip into a retarget-ready source skeleton + core context. */
@@ -1136,12 +1138,12 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
-	return { source, core, trackByCanonical, duration, frameFixDeg: fix?.deg ?? 0 };
+	return { source, core, trackByCanonical, duration, frameFixDeg: fix?.deg ?? 0, bindFromFile: skinBind !== null };
 }
 
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
-	const { core, trackByCanonical, duration, frameFixDeg } = buildFbxCore(clip, opts);
-	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts);
+	const { core, trackByCanonical, duration, frameFixDeg, bindFromFile } = buildFbxCore(clip, opts);
+	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts, bindFromFile);
 	const out = retargetCoreClip(core, clip.name);
 	// In place: センター loses its horizontal path outright; every other exported
 	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
@@ -1230,7 +1232,7 @@ export interface SourcePreview {
  * alignment context the retarget itself uses, exposed for the inset panel.
  */
 export function createSourcePreview(clip: AnimationClip, opts?: RetargetOptions): SourcePreview {
-	const { source, core, trackByCanonical, duration } = buildFbxCore(clip, opts);
+	const { source, core, trackByCanonical, duration, bindFromFile } = buildFbxCore(clip, opts);
 
 	const bones: SourcePreviewBone[] = source.bones.map((b) => ({
 		name: b.name,
@@ -1245,7 +1247,7 @@ export function createSourcePreview(clip: AnimationClip, opts?: RetargetOptions)
 		alignedCount: core.mappedBones.filter(b => b.frameAlign).length,
 		scale: core.positionScale,
 		unmapped,
-		bindMissing: restPoseIsFirstFrame(clip) && !pickBindReference(clip, opts),
+		bindMissing: !bindFromFile && restPoseIsFirstFrame(clip) && !pickBindReference(clip, opts),
 	};
 
 	const n = source.bones.length;
@@ -1283,6 +1285,7 @@ function reportOnce(
 	trackByCanonical: Map<string, BoneTrack>,
 	frameFixDeg = 0,
 	opts?: RetargetOptions,
+	bindFromFile = false,
 ): void {
 	if (reportedClips.has(clip.name)) return;
 	reportedClips.add(clip.name);
@@ -1292,7 +1295,7 @@ function reportOnce(
 	console.log(
 		`[retarget] "${clip.name}": ${profile}, scale=${core.positionScale.toFixed(4)}, ` +
 		`${core.mappedBones.length} mapped (${aligned} aligned)` +
-		(restPoseIsFirstFrame(clip) && !pickBindReference(clip, opts)
+		(!bindFromFile && restPoseIsFirstFrame(clip) && !pickBindReference(clip, opts)
 			? ', REST POSE IS FRAME 0 — supply the rig\'s T-pose file for a correct bind'
 			: '') +
 		(frameFixDeg > 0 ? `, world frame corrected ${frameFixDeg.toFixed(0)}°` : '') +
