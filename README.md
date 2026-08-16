@@ -16,18 +16,16 @@ One piece of the **Reze MMD family**, covering the whole MMD workflow on the web
 
 ## How it works
 
-The retargeter expresses each source bone's animation as a world-orientation delta from its own bind pose, aligns it onto the MMD skeleton, and writes parent-local rotations for MMD's bone hierarchy (センター / 上半身 / 左腕 / …). The calibrations that make this work across rigs happen automatically, per file:
+Each source bone's animation is expressed as a world-orientation delta from its own bind pose, aligned onto the MMD skeleton, and written as parent-local rotations for MMD's hierarchy (センター / 上半身 / 左腕 / …). Every calibration below happens automatically, per file — there is nothing to configure.
 
-- **Rig detection.** Mixamo (`mixamorig:*`), UE-Mannequin / Unity Humanoid (`pelvis`, `upperarm_l`, `clavicle_r`, …) and 3ds Max Biped (`Bip001 L Thigh`, `Bip01_Spine1`, …) names resolve to one canonical scheme, then to MMD's Japanese bone names. Bone hierarchy comes from the FBX's own connections.
-- **Files that arrive rotated.** A source authored Z-up, or one carrying its axis conversion on a node above the animated bones, is measured from its own bind pose and stood upright before anything else runs — so a file that would otherwise convert face-down converts exactly as the same file upright would.
-- **The bind pose comes from the skeleton, not from the export.** FBX records the true bind in the skin (`TransformLink`) or in a `BindPose` node, and some exporters write the current frame as the rest pose instead — which collapses alignment and throws the translation scale out with it. The real bind is read wherever a file carries one; where it doesn't, dropping the pack's T-pose file supplies it, and the source panel says so rather than converting silently.
-- **Segment alignment for any bind pose.** For every mapped bone, the same anatomical segment (bone → its mapped child) is measured on both skeletons' bind poses, and a shortest-arc swing maps one onto the other. T-pose, A-pose, and relaxed binds all convert the same way — arms, legs, feet, spine, and fingers included.
-- **The target model is measured, not assumed.** Bone positions are read from the loaded PMX at bind, so alignment and proportions adapt to whatever model is in the viewport. Upload your own model as a zip (a picker appears when the zip holds several `.pmx` files) and the loaded motion re-retargets to it on the spot.
-- **Translation scale from the skeletons themselves.** The hip-height ratio between source and target scales root motion — centimeter, meter, and inch exports all land correctly, including Mixamo characters with different rig sizes.
-- **Feet are placed, not derived.** Two skeletons never share proportions — a source's legs may be 95% of its hip height against a model's 79% — so reproducing joint angles faithfully lands the feet somewhere else, which reads as sliding. The VMD drives 左足ＩＫ / 右足ＩＫ with the source's own foot positions, the way MMD motions normally work, so the result adapts to other models too; the remaining chains carry IK-disable frames.
-- **Bind-reference override for broken exports.** Some Unity per-pose clips embed the first animation frame as their rest pose instead of the real bind. When such a clip is detected, the canonical bind from an idle clip stands in, so "delta from rest" references the right baseline.
+- **Rig detection.** Mixamo, UE-Mannequin / Unity Humanoid, 3ds Max Biped and Character Creator names resolve to MMD's Japanese bone names, with the hierarchy taken from the file's own connections.
+- **Any bind pose.** Each bone is aligned by measuring the same anatomical segment on both skeletons, so T-pose, A-pose and relaxed binds convert alike — arms, legs, feet, spine and fingers.
+- **The true bind, wherever it lives.** FBX records it in the skin or a `BindPose` node; exporters that overwrite the rest pose with the current frame no longer break the conversion. A file authored Z-up is stood upright first. When nothing supplies a bind, the tool says so instead of converting silently.
+- **The target model is measured, not assumed.** Bone positions come from the loaded PMX, so alignment, proportions and translation scale adapt to whatever model is in the viewport — centimetre, metre and inch exports all land correctly. Upload your own model as a zip and the motion re-retargets to it on the spot.
+- **Feet are placed, not derived.** The VMD drives 左足ＩＫ / 右足ＩＫ from the source's own foot positions, so a proportion difference between the two skeletons doesn't turn into sliding, and the motion adapts to other models.
+- **In Place** removes horizontal travel while keeping the vertical, so jumps and crouches survive.
 
-Playback preview and the downloaded file share one code path: the converted clip loads into the engine's animation system directly and `exportVmd` serializes exactly what you watched. **In Place** strips horizontal root motion the way Mixamo's option does, keeping the vertical so jumps and crouches survive.
+Preview and download share one code path: the converted clip plays in the engine directly, and `exportVmd` serializes exactly what you watched.
 
 ## Supported source rigs
 
@@ -38,7 +36,7 @@ Playback preview and the downloaded file share one code path: the converted clip
 | Reallusion Character Creator  | `CC_Base_Hip`, `CC_Base_L_Upperarm`    | Mapped, lightly tested |
 | 3ds Max Biped                 | `Bip001 Pelvis`, `Bip01 L Thigh`       | Mapped, lightly tested |
 
-Any other humanoid rig is worth a try — the retarget math is rig-agnostic, and the naming table is the only part that is rig-specific. The panel in the corner shows the skeleton as parsed, with the rig profile, how many bones mapped and the scale that was measured; bones that mapped draw bright and unmapped ones stay dim. If a rig converts badly, or names go unmapped, open an issue with that line and the file if you can share it.
+Any other humanoid rig is worth a try: the retarget is rig-agnostic and only the naming table is rig-specific. The corner panel shows the skeleton as parsed — rig profile, bones mapped, measured scale, with unmapped bones dimmed. If a rig converts badly, open an issue with that line and the file if you can share it.
 
 ## Batch conversion
 
@@ -59,3 +57,5 @@ Directories are scanned recursively; each clip writes `<out>/<basename>.vmd`.
 | `--no-foot-ik`        | Drive the legs by FK instead of exporting foot-IK targets                |
 | `--bind-ref <file>`   | Anchor per-pose exports to this clip's bind (defaults to an `Idle.fbx` among the inputs) |
 | `--no-bind-ref`       | Use each clip's own rest pose                                            |
+
+`scripts/regression.ts` pins every verified conversion — profile, bone counts, scale and a checksum over all exported keys — so a change to the retarget can't quietly alter motions that already work.
