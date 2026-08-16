@@ -497,7 +497,7 @@ class AnimationParser {
 				const postRotation = this.getPostRotation(model);
 				const lclRotation = this.getLclRotation(model);
 				const lclTranslation = this.getLclTranslation(model);
-				const eulerOrder = "ZXY";
+				const eulerOrder = this.getRotationOrder(model);
 				
 				// Extract rest pose for bone hierarchy computation. FBX omits any
 				// property whose value is the default — Mixamo drops Lcl Rotation for
@@ -720,9 +720,24 @@ class AnimationParser {
 		return null;
 	}
 
-	private getEulerOrder(): string {
-		// Always use ZXY rotation order
-		return 'ZXY';
+	/**
+	 * The order the file's three rotation channels compose in.
+	 *
+	 * FBX omits the property when it is the default, which is why every Mixamo
+	 * rig here reports nothing — they are all plain XYZ. Exporters that pick
+	 * another order say so, and taking their word for it matters most exactly
+	 * where it is hardest to see: at gimbal lock, two channels swing to equal
+	 * and opposite extremes that cancel only in the intended order. Compose
+	 * them in any other and a knee bent to 85° acquires an 80° twist.
+	 */
+	private getRotationOrder(model: FBXReaderNode): string {
+		const props = model.node('Properties70')?.nodes('P') ?? [];
+		for (const p of props) {
+			if (p.prop(0, 'string') !== 'RotationOrder') continue;
+			const v = p.prop(4, 'number');
+			return FBX_ROTATION_ORDERS[Number(v)] ?? 'XYZ';
+		}
+		return 'XYZ';
 	}
 
 	private getLclRotation(model: FBXReaderNode): [number, number, number] | null {
@@ -777,7 +792,7 @@ class AnimationParser {
 		return null;
 	}
 
-	private parseCurveNode(curveNode: FBXReaderNode, modelName: string, preRotation: number[] | null = null, postRotation: number[] | null = null, eulerOrder: string = 'ZXY', restPose: BoneRestPose | null = null): BoneTrack | null {
+	private parseCurveNode(curveNode: FBXReaderNode, modelName: string, preRotation: number[] | null = null, postRotation: number[] | null = null, eulerOrder: string = 'XYZ', restPose: BoneRestPose | null = null): BoneTrack | null {
 		const attrName = curveNode.prop(1, 'string') || '';
 
 		// Only parse rotation (quaternion) tracks
@@ -1155,7 +1170,7 @@ class AnimationParser {
 				// Include intermediate frames (but not t=0, which is already added)
 				for (let t = step; t < 1; t += step) {
 					const Q = Quat.slerp(Q1, Q2, t);
-					const E = quaternionToEuler(Q);
+					const E = quaternionToEulerForOrder(Q, eulerOrder);
 					
 					times.push(initialTime + t * timeSpan);
 					values.push(E.x);
@@ -1447,18 +1462,32 @@ function eulerToQuatIntrinsicZYX(x: number, y: number, z: number): Quat {
 	return Quat.fromEulerOrder(x, y, z, "ZYX");
 }
 
-// Helper to convert Euler to quaternion. Only the 'ZXY'-labelled order is handled
-// (its historical local formula was intrinsic ZYX — same composition as Pre/Post);
-// anything else falls back to identity, as before.
-function eulerToQuaternionByOrder(x: number, y: number, z: number, _order: string): Quat {
-	if (_order !== 'ZXY') return Quat.identity();
-	return Quat.fromEulerOrder(x, y, z, "ZYX");
+/** FBX's RotationOrder enum, in its own numbering. 6 is spherical XYZ, which
+ *  no rig here uses; it falls back to the default. */
+const FBX_ROTATION_ORDERS: Record<number, string> = {
+	0: 'XYZ', 1: 'XZY', 2: 'YZX', 3: 'YXZ', 4: 'ZXY', 5: 'ZYX', 6: 'XYZ',
+};
+
+/** An FBX order names the axes in the sequence they are applied; the quaternion
+ *  helper names them in composition sequence, which is the reverse. */
+const REVERSED_ORDER: Record<string, Parameters<typeof Quat.fromEulerOrder>[3]> = {
+	XYZ: 'ZYX', XZY: 'YZX', YZX: 'XZY', YXZ: 'ZXY', ZXY: 'YXZ', ZYX: 'XYZ',
+};
+
+// Historically this took the label 'ZXY' and composed intrinsic ZYX — correct
+// only because every rig it ever saw was really the FBX default, XYZ. It now
+// reads the order the file declares and reverses it into composition sequence,
+// which leaves those files on exactly the same path.
+function eulerToQuaternionByOrder(x: number, y: number, z: number, order: string): Quat {
+	const composition = REVERSED_ORDER[order];
+	if (!composition) return Quat.identity();
+	return Quat.fromEulerOrder(x, y, z, composition);
 }
 
 /** Full local rest **Pre·Lcl·Post⁻¹** (Three.FBXLoader-compatible): Lcl **ZXY** (see {@link AnimationParser} curves), Pre/Post **ZYX**, Post stored inverted in file. */
 export function bindQuatFromBoneRestPose(rest: BoneRestPose | null): Quat | null {
 	if (!rest?.lclRotation || rest.lclRotation.length < 3) return null;
-	const t = eulerToQuaternionByOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], 'ZXY');
+	const t = eulerToQuaternionByOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], 'XYZ');
 	let q = new Quat(t.x, t.y, t.z, t.w);
 	if (rest.preRotation && rest.preRotation.length >= 3) {
 		const qPre = eulerToQuatIntrinsicZYX(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2]);
@@ -1475,7 +1504,7 @@ export function bindQuatFromBoneRestPose(rest: BoneRestPose | null): Quat | null
 /** LclRotation only — matches parent-local `R` keys from {@link AnimationParser} / {@link generateQuaternions}. */
 export function bindQuatFromRestPoseLclOnly(rest: BoneRestPose | null): Quat | null {
 	if (!rest?.lclRotation || rest.lclRotation.length < 3) return null;
-	const t = eulerToQuaternionByOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], 'ZXY');
+	const t = eulerToQuaternionByOrder(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2], 'XYZ');
 	return new Quat(t.x, t.y, t.z, t.w).normalize();
 }
 
@@ -1485,7 +1514,7 @@ export function bindQuatFromRestPoseLclOnly(rest: BoneRestPose | null): Quat | n
  */
 export function bindQuatFromRestPosePreLcl(rest: BoneRestPose | null): Quat | null {
 	if (!rest) return null;
-	const e = (x: number, y: number, z: number) => eulerToQuaternionByOrder(x, y, z, 'ZXY');
+	const e = (x: number, y: number, z: number) => eulerToQuaternionByOrder(x, y, z, 'XYZ');
 	const toQ = (t: { x: number; y: number; z: number; w: number }) => new Quat(t.x, t.y, t.z, t.w);
 	if (rest.lclRotation && rest.lclRotation.length >= 3) {
 		let q = toQ(e(rest.lclRotation[0], rest.lclRotation[1], rest.lclRotation[2]));
@@ -1498,6 +1527,25 @@ export function bindQuatFromRestPosePreLcl(rest: BoneRestPose | null): Quat | nu
 		return eulerToQuatIntrinsicZYX(rest.preRotation[0], rest.preRotation[1], rest.preRotation[2]);
 	}
 	return null;
+}
+
+/**
+ * Decompose back to the Euler triple this file's curves are written in.
+ *
+ * Only the >=180° subdivision path needs this, and it needs it badly: it turns a
+ * slerped quaternion back into angles, so a decomposition that disagrees with the
+ * composition writes a key nothing else can read. Wraps are where that path fires,
+ * and a wrapped channel at gimbal lock — an arm held at X=+85° whose Y crosses
+ * -360° — lands on both problems at once.
+ *
+ * Default-order files keep the original decomposition, mismatch and all, so their
+ * output does not move.
+ */
+function quaternionToEulerForOrder(q: Quat, order: string): { x: number, y: number, z: number } {
+	const composition = REVERSED_ORDER[order];
+	if (!composition || order === 'XYZ') return quaternionToEuler(q);
+	const e = Quat.toEulerOrder(q, composition);
+	return { x: e.x, y: e.y, z: e.z };
 }
 
 // NOTE: this decomposition is intrinsic ZXY (engine `Quat.toEulerOrder(q, "ZXY")`),
