@@ -353,7 +353,7 @@ export default function Home() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".fbx,.json,application/json"
+            accept=""
             onChange={handleFileChange}
             className="hidden"
           />
