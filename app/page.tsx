@@ -30,6 +30,20 @@ const DEFAULT_MODEL_KEY = "thoth"
 const NO = ["false", "0", "off", "no"]
 const USE_DEFAULT_ASSETS = !NO.includes((process.env.NEXT_PUBLIC_USE_DEFAULT_ASSETS ?? "").trim().toLowerCase())
 
+/**
+ * Where the demo model, the bind reference and the prebaked dance come from.
+ *
+ * A deployed build reads them from R2, whose egress is free, so the ~9MB a
+ * visitor downloads never touches the deployment's transfer budget. `next dev`
+ * reads the same files out of `public/`, which keeps a checkout self-contained:
+ * editing a texture and reloading works without a round trip through a bucket,
+ * and the demo still runs on a plane.
+ *
+ * Keys there are versioned by path, which is what lets them carry a one-year
+ * immutable cache header: rename, never overwrite in place.
+ */
+const ASSETS = process.env.NODE_ENV === "production" ? "https://assets.reze.one/demo/reze-rig" : ""
+
 /** Fill the gaps in the engine's built-in CN name hints for the Thoth PMX
  *  (grouping mirrors reze-design's hand-authored scene doc for this model). */
 const THOTH_STYLE_OVERRIDES: MaterialPresetMap = {
@@ -216,7 +230,7 @@ export default function Home() {
         if (USE_DEFAULT_ASSETS) {
           const model = await engine.loadModel(
             DEFAULT_MODEL_KEY,
-            "/models/托特/托特.pmx"
+            `${ASSETS}/models/托特/托特.pmx`
           )
           // Hidden until styled — the reveal wears the intended look.
           engine.setModelTransform(DEFAULT_MODEL_KEY, { visible: false })
@@ -240,7 +254,7 @@ export default function Home() {
         // subtract against.
         try {
           const refLoader = new FBXLoader()
-          const refClips = await refLoader.loadAsync("/fbx/Idle.fbx")
+          const refClips = await refLoader.loadAsync(`${ASSETS}/fbx/Idle.fbx`)
           if (refClips[0]) ueBindRefRef.current = buildBindReferenceFromClip(refClips[0])
         } catch (e) {
           console.warn("Failed to load UE bind reference (Idle.fbx):", e)
@@ -249,7 +263,7 @@ export default function Home() {
         // Demo motion, prebaked from its Character Creator FBX
         // (scripts/prebake-clip.ts): same clip through the same conversion
         // path, 9.7MB and 1.8s of parsing lighter.
-        if (USE_DEFAULT_ASSETS) await loadFBXAndPlay("/fbx/dance-graceful.json", "dance-graceful.vmd")
+        if (USE_DEFAULT_ASSETS) await loadFBXAndPlay(`${ASSETS}/fbx/dance-graceful.json`, "dance-graceful.vmd")
 
         setEngineError(null)
       } catch (error) {
