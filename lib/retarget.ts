@@ -800,7 +800,7 @@ function measureFrameFix(
 	bindWorld: V3[],
 	idxByCanonical: Map<string, number>,
 	targetPositions: Record<string, V3> | undefined,
-): { q: Q4; deg: number } | null {
+): { q: Q4 | null; deg: number } | null {
 	if (!targetPositions) return null;
 	const srcPos = (name: string): V3 | null => {
 		const i = idxByCanonical.get(name);
@@ -821,7 +821,13 @@ function measureFrameFix(
 	// Only correct what an axis error explains: a rig that simply sits at an odd
 	// angle is left to the per-bone alignment, which is built for exactly that.
 	const residual = q4AngleDeg(q4Mul(measured, q4Conj(snapped)));
-	return residual <= FRAME_FIX_TOLERANCE_DEG ? { q: snapped, deg } : null;
+	if (residual <= FRAME_FIX_TOLERANCE_DEG) return { q: snapped, deg };
+	// Declined — and worth saying so. The measurement found the two skeletons
+	// standing differently but could not blame an axis on it, which is what a
+	// posed rest pose does to the side probe. The conversion goes ahead and the
+	// character can come out lying down; silence there reads as "nothing to
+	// report" rather than "measured, and gave up".
+	return { q: null, deg: q4AngleDeg(measured) };
 }
 
 /* ============================================================================
@@ -945,6 +951,8 @@ interface FbxCore {
 	duration: number
 	/** Global frame correction applied to the source, in degrees (0 = none). */
 	frameFixDeg: number
+	/** A frame disagreement that was measured but refused, in degrees (0 = none). */
+	frameFixDeclinedDeg: number
 	/** The file carried its own bind (skin clusters or a BindPose node). */
 	bindFromFile: boolean
 }
@@ -1067,6 +1075,24 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		});
 	}
 
+	// Does anything on the hip's chain animate a translation? The exported
+	// センター is Hips' WORLD displacement, so travel keyed on a reference bone
+	// above the pelvis is already included through FK — but asking only whether
+	// HIPS itself has a position track missed exactly that shape, and a rig that
+	// keys its travel on a root and leaves the pelvis rotation-only lost every
+	// step of it silently. Mixamo keys the hips, UE keys both; the rigs that key
+	// only the root are the ones this is for.
+	const hipsCarriesTranslation = (() => {
+		let c: string | null = 'Hips';
+		const guard = new Set<string>();
+		while (c && !guard.has(c)) {
+			if (positionTrackByCanonical.has(c)) return true;
+			guard.add(c);
+			c = parentCache.get(c) ?? null;
+		}
+		return false;
+	})();
+
 	// Set once the source's world frame is measured against the target's; the
 	// root bones carry it, so every descendant inherits it through FK.
 	let frameFix: Q4 | null = null;
@@ -1104,7 +1130,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		idxByCanonical,
 		targetPositions,
 	);
-	if (fix) {
+	if (fix?.q) {
 		frameFix = fix.q;
 		for (const b of bones) {
 			if (b.parentIndex >= 0) continue;
@@ -1118,7 +1144,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		targetPositions,
 		positionScale: DEFAULT_POSITION_SCALE, // patched below once bind FK exists
 		translationExports: [
-			...(positionTrackByCanonical.has('Hips') ? [{ srcBone: 'Hips', mmdBone: 'センター' }] : []),
+			...(hipsCarriesTranslation ? [{ srcBone: 'Hips', mmdBone: 'センター' }] : []),
 			...(opts?.footIK
 				? [
 					{ srcBone: 'LeftFoot', mmdBone: '左足ＩＫ' },
@@ -1138,12 +1164,20 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
-	return { source, core, trackByCanonical, duration, frameFixDeg: fix?.deg ?? 0, bindFromFile: skinBind !== null };
+	return {
+		source,
+		core,
+		trackByCanonical,
+		duration,
+		frameFixDeg: fix?.q ? fix.deg : 0,
+		frameFixDeclinedDeg: fix && !fix.q ? fix.deg : 0,
+		bindFromFile: skinBind !== null,
+	};
 }
 
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
-	const { core, trackByCanonical, duration, frameFixDeg, bindFromFile } = buildFbxCore(clip, opts);
-	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts, bindFromFile);
+	const { core, trackByCanonical, duration, frameFixDeg, frameFixDeclinedDeg, bindFromFile } = buildFbxCore(clip, opts);
+	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts, bindFromFile, frameFixDeclinedDeg);
 	const out = retargetCoreClip(core, clip.name);
 	// In place: センター loses its horizontal path outright; every other exported
 	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
@@ -1286,6 +1320,7 @@ function reportOnce(
 	frameFixDeg = 0,
 	opts?: RetargetOptions,
 	bindFromFile = false,
+	frameFixDeclinedDeg = 0,
 ): void {
 	if (reportedClips.has(clip.name)) return;
 	reportedClips.add(clip.name);
@@ -1299,6 +1334,9 @@ function reportOnce(
 			? ', REST POSE IS FRAME 0 — supply the rig\'s T-pose file for a correct bind'
 			: '') +
 		(frameFixDeg > 0 ? `, world frame corrected ${frameFixDeg.toFixed(0)}°` : '') +
+		(frameFixDeclinedDeg > 0
+			? `, WORLD FRAME OFF BY ${frameFixDeclinedDeg.toFixed(0)}° — no axis rotation explains it, converting as-is`
+			: '') +
 		`, unmapped tracks: ${unmapped.join(', ') || 'none'}`,
 	);
 }
