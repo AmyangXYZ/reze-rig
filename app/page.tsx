@@ -46,9 +46,9 @@ const ASSETS = process.env.NODE_ENV === "production" ? "https://assets.reze.one/
 
 /** Fill the gaps in the engine's built-in CN name hints for the Thoth PMX
  *  (grouping mirrors reze-design's hand-authored scene doc for this model). */
-const THOTH_STYLE_OVERRIDES: MaterialPresetMap = {
-  body: ["手"],
-  metal: ["指甲"],
+const REZE_STYLE_OVERRIDES: MaterialPresetMap = {
+  body: ["skin"],
+  stockings: ["socks"],
 }
 
 export default function Home() {
@@ -227,15 +227,16 @@ export default function Home() {
         // scrubbing can't explode the cloth.
         setLoading(false)
         engine.runRenderLoop()
+        engine.setOutlineEnabled(true)
         if (USE_DEFAULT_ASSETS) {
           const model = await engine.loadModel(
             DEFAULT_MODEL_KEY,
-            `${ASSETS}/models/托特/托特.pmx`
+            "https://assets.reze.one/demo/reze/reze.pmx"
           )
           // Hidden until styled — the reveal wears the intended look.
           engine.setModelTransform(DEFAULT_MODEL_KEY, { visible: false })
           modelRef.current = model
-          await engine.autoStyleGroups(DEFAULT_MODEL_KEY, THOTH_STYLE_OVERRIDES)
+          await engine.autoStyleGroups(DEFAULT_MODEL_KEY, REZE_STYLE_OVERRIDES)
           engine.setModelTransform(DEFAULT_MODEL_KEY, { visible: true })
         }
 
