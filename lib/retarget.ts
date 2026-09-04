@@ -1177,6 +1177,31 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
+	// Foot IK: auto-detect target model's heel status
+	// Measure ankle-to-toe distance. If significant heel offset exists (ankle ahead of toe),
+	// blend IK target between toe (no heel) and ankle (with heel) based on target's geometry.
+	if (opts?.footIK && targetPositions) {
+		const measureFootOffset = (ankleKey: string, toeKey: string): number => {
+			const ankle = targetPositions[ankleKey];
+			const toe = targetPositions[toeKey];
+			if (!ankle || !toe) return 0;
+			// Heel offset: how far back (in Z) the ankle is from toe. Positive = heel exists.
+			return Math.max(0, toe[2] - ankle[2]); // toe_z - ankle_z (left-handed Y-up, Z is depth)
+		};
+		const leftHeelOffset = measureFootOffset('左足首', '左足先EX');
+		const rightHeelOffset = measureFootOffset('右足首', '右足先EX');
+		const targetHeelOffset = (leftHeelOffset + rightHeelOffset) / 2;
+
+		// If target has significant heel offset, adjust source bone to foot instead of toe
+		if (targetHeelOffset > 0.1) {
+			// Target has a heel: use foot-based IK
+			core.translationExports.forEach(t => {
+				if (t.mmdBone === '左足ＩＫ') t.srcBone = 'LeftFoot';
+				if (t.mmdBone === '右足ＩＫ') t.srcBone = 'RightFoot';
+			});
+		}
+	}
+
 	return {
 		source,
 		core,
