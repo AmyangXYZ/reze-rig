@@ -1160,8 +1160,8 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 			...(hipsCarriesTranslation ? [{ srcBone: 'Hips', mmdBone: 'センター' }] : []),
 			...(opts?.footIK
 				? [
-					{ srcBone: 'LeftFoot', mmdBone: '左足ＩＫ' },
-					{ srcBone: 'RightFoot', mmdBone: '右足ＩＫ' },
+					{ srcBone: 'LeftToeBase', mmdBone: '左足ＩＫ' },
+					{ srcBone: 'RightToeBase', mmdBone: '右足ＩＫ' },
 				]
 				: []),
 		],
