@@ -76,8 +76,22 @@ export default function Home() {
   /** Strip horizontal root motion (Mixamo's "In Place"). */
   const [inPlace, setInPlace] = useState(false)
   const inPlaceRef = useRef(inPlace)
+  /** Place the feet by IK, or reproduce the source's own ankle angles. */
+  const [footIK, setFootIK] = useState(false)
+  const footIKRef = useRef(footIK)
+  /** Draw the target model's rig over it — what the retarget actually produced. */
+  const [showSkeleton, setShowSkeleton] = useState(false)
+  const showSkeletonRef = useRef(showSkeleton)
   /** Zip contained several PMX files — user picks which one to load. */
   const [modelPick, setModelPick] = useState<{ files: File[]; paths: string[] } | null>(null)
+
+  /** Point the rig overlay at whichever model is loaded now, or take it away.
+   *  Re-applied on model swap: the overlay is bound to a registry key, and a
+   *  swap mints a new one. */
+  const applyBoneOverlay = useCallback((on: boolean) => {
+    showSkeletonRef.current = on
+    engineRef.current?.setBoneOverlay(on ? currentModelKeyRef.current : null)
+  }, [])
 
   /** Retarget parsed clips to the CURRENT model and start playback. */
   const convertAndPlay = useCallback(async (rawClips: AnimationClip[], fileName?: string) => {
@@ -96,12 +110,13 @@ export default function Home() {
       bindReference: [userBindRefRef.current, ueBindRefRef.current].filter((r) => r !== null),
       targetPositions: targetPositionsRef.current,
       inPlace: inPlaceRef.current,
-      // Feet are PLACED rather than derived from joint angles. Two skeletons
-      // never share proportions — this model's legs are 79% of its hip height
-      // against a typical source's 95% — and reproducing angles faithfully then
-      // lands the feet somewhere else, which reads as sliding. Driving 足ＩＫ is
-      // also what MMD motions normally do, so the result adapts to other models.
-      footIK: true,
+      // On, the feet are PLACED rather than derived from joint angles: two
+      // skeletons never share proportions, so reproducing angles faithfully
+      // lands the feet somewhere else, which reads as sliding. Off, the source's
+      // own ankle trajectory survives exactly and the feet land wherever the
+      // proportions put them — right for a clip whose legs matter more than its
+      // ground contact, and for a target built like the source.
+      footIK: footIKRef.current,
     })
     if (mmdClips.length === 0) return
 
@@ -172,6 +187,7 @@ export default function Home() {
       await engine.autoStyleGroups(key)
       await new Promise((r) => requestAnimationFrame(r))
       targetPositionsRef.current = measureTargetPositions((n) => model.getBoneWorldPosition(n))
+      applyBoneOverlay(showSkeletonRef.current)
       const src = lastSourceRef.current
       if (src) await convertAndPlay(src.clips, src.fileName)
     } catch (e) {
@@ -180,7 +196,7 @@ export default function Home() {
     } finally {
       setConverting(false)
     }
-  }, [convertAndPlay])
+  }, [convertAndPlay, applyBoneOverlay])
 
   const handleModelFolder = useCallback(async (files: File[]) => {
     try {
@@ -292,6 +308,10 @@ export default function Home() {
   const handleUploadClick = useCallback(() => {
     fileInputRef.current?.click()
   }, [])
+
+  useEffect(() => {
+    applyBoneOverlay(showSkeleton)
+  }, [showSkeleton, applyBoneOverlay])
 
   useEffect(() => {
     void (async () => {
@@ -450,6 +470,41 @@ export default function Home() {
             title="Strip horizontal root motion; jumps and crouches keep their height"
           >
             In Place
+          </Button>
+
+          {/* Foot IK: placed feet vs the source's own ankle angles */}
+          <Button
+            size="sm"
+            className={
+              footIK
+                ? "border border-blue-400/40 bg-blue-500 text-white hover:bg-blue-400"
+                : "border border-white/10 bg-zinc-950/40 text-white/80 backdrop-blur-xs hover:bg-zinc-900"
+            }
+            onClick={() => {
+              const next = !footIK
+              setFootIK(next)
+              footIKRef.current = next
+              const src = lastSourceRef.current
+              if (src) void convertAndPlay(src.clips, src.fileName)
+            }}
+            disabled={converting}
+            title="On: place the feet by IK so they meet the floor. Off: keep the source's own ankle angles"
+          >
+            Foot IK
+          </Button>
+
+          {/* The rig the retarget actually produced, drawn over the model */}
+          <Button
+            size="sm"
+            className={
+              showSkeleton
+                ? "border border-blue-400/40 bg-blue-500 text-white hover:bg-blue-400"
+                : "border border-white/10 bg-zinc-950/40 text-white/80 backdrop-blur-xs hover:bg-zinc-900"
+            }
+            onClick={() => setShowSkeleton(!showSkeleton)}
+            title="Draw the model's rig over it"
+          >
+            Skeleton
           </Button>
         </div>
       )}
