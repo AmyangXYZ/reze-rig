@@ -76,7 +76,8 @@ export default function Home() {
   /** Strip horizontal root motion (Mixamo's "In Place"). */
   const [inPlace, setInPlace] = useState(false)
   const inPlaceRef = useRef(inPlace)
-  /** Place the feet by IK, or reproduce the source's own ankle angles. */
+  /** Drive the legs through the model's IK chains and sit it on the floor, or
+   *  reproduce the source's own joint angles wherever they land. */
   const [footIK, setFootIK] = useState(false)
   const footIKRef = useRef(footIK)
   /** Draw the target model's rig over it — what the retarget actually produced. */
@@ -110,12 +111,10 @@ export default function Home() {
       bindReference: [userBindRefRef.current, ueBindRefRef.current].filter((r) => r !== null),
       targetPositions: targetPositionsRef.current,
       inPlace: inPlaceRef.current,
-      // On, the feet are PLACED rather than derived from joint angles: two
-      // skeletons never share proportions, so reproducing angles faithfully
-      // lands the feet somewhere else, which reads as sliding. Off, the source's
-      // own ankle trajectory survives exactly and the feet land wherever the
-      // proportions put them — right for a clip whose legs matter more than its
-      // ground contact, and for a target built like the source.
+      // On, the legs run through this model's IK chains and the body rises until
+      // the lower foot clears the floor. Off, the source's joint angles are
+      // reproduced exactly and the feet land wherever the proportions put them,
+      // which for a target built unlike the source can be through the ground.
       footIK: footIKRef.current,
     })
     if (mmdClips.length === 0) return
@@ -472,7 +471,7 @@ export default function Home() {
             In Place
           </Button>
 
-          {/* Foot IK: placed feet vs the source's own ankle angles */}
+          {/* IK: land on this model's floor, vs the source's own angles */}
           <Button
             size="sm"
             className={
@@ -488,9 +487,9 @@ export default function Home() {
               if (src) void convertAndPlay(src.clips, src.fileName)
             }}
             disabled={converting}
-            title="On: place the feet by IK so they meet the floor. Off: keep the source's own ankle angles"
+            title="On: drive the legs through the model's IK chains and sit it on the floor. Off: keep the source's own joint angles"
           >
-            Foot IK
+            IK
           </Button>
 
           {/* The rig the retarget actually produced, drawn over the model */}

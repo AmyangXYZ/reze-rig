@@ -1,6 +1,6 @@
 {
   "name": "reze-rig",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "imports": {
     "reze-engine": "./node_modules/reze-engine/dist/index.js"

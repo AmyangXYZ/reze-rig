@@ -13,6 +13,7 @@ import {
 	type Q4,
 	type RetargetCoreContext,
 	type RetargetedClip,
+	type RetargetedPositionTrack,
 	type RetargetSource,
 	type SourceBone,
 	type V3,
@@ -1241,10 +1242,174 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 	};
 }
 
+/**
+ * Stop a foot travelling while it is standing on the floor.
+ *
+ * Two skeletons reach the same joint angles at slightly different places, and
+ * across a contact that error accumulates into a foot that skates. A foot on the
+ * floor is not moving, so every bit of horizontal travel inside a contact span
+ * is error: the span is pinned to where it sat on average. The pin ramps in and
+ * out over a few frames, so correcting a slide cannot introduce a step of its
+ * own at the span's edges.
+ *
+ * Vertical is left alone — that is the ground's business, settled by the lift.
+ *
+ * The ramp is as long as the correction needs, not a fixed few frames: pulling a
+ * foot back by `d` across `n` frames moves it `d/n` per frame, so a fixed ramp
+ * turns a large correction into a pop of its own (a 4-frame ramp doubled the
+ * worst frame step on the demo dance). Sizing it by `d` bounds what pinning can
+ * introduce. A span too short to absorb its own correction is left alone — a
+ * foot that travels that far that fast is stepping, not skating.
+ */
+function pinPlantedFoot(positions: Vec3[], grounded: boolean[], legLength: number): Vec3[] {
+	// What the correction may move the foot by in one frame.
+	const perFrame = legLength * 0.02;
+	const out = positions.slice();
+	let i = 0;
+	while (i < out.length) {
+		if (!grounded[i]) { i++; continue; }
+		let j = i;
+		while (j + 1 < out.length && grounded[j + 1]) j++;
+		const span = j - i + 1;
+		if (span < 3) { i = j + 1; continue; }
+
+		let mx = 0;
+		let mz = 0;
+		for (let k = i; k <= j; k++) { mx += out[k].x; mz += out[k].z; }
+		mx /= span;
+		mz /= span;
+
+		let pull = 0;
+		for (let k = i; k <= j; k++) pull = Math.max(pull, Math.hypot(out[k].x - mx, out[k].z - mz));
+		const ramp = Math.ceil(pull / perFrame);
+		if (ramp > span / 2) { i = j + 1; continue; }
+
+		for (let k = i; k <= j; k++) {
+			const w = ramp > 0 ? Math.min(1, Math.min(k - i, j - k) / ramp) : 1;
+			out[k] = new Vec3(out[k].x + (mx - out[k].x) * w, out[k].y, out[k].z + (mz - out[k].z) * w);
+		}
+		i = j + 1;
+	}
+	return out;
+}
+
+/**
+ * Rebuild the foot-IK targets from where the TARGET model's own leg lands, and
+ * say how far the body has to rise for the lower foot to clear the floor.
+ *
+ * TARGETS. The rotations and the IK targets were built on two different
+ * conventions. Bone rotations come from absolute segment alignment: `F` makes
+ * this model's thigh point where the source's thigh points, so a source bind
+ * standing feet-apart yields a stance that wide. The IK targets came from
+ * BIND-RELATIVE source displacement — how far the source's foot moved from the
+ * source's own bind — which is zero for anything the source's bind pose already
+ * had. Stance width is exactly that: an idle standing at its own T-pose width
+ * exported no offset, so the solver planted the feet at THIS model's bind stance
+ * and threw the pose's away (Idle went from 2.08 wide to 1.38, this model's own
+ * bind stance, dragging each foot 2.26 units). Deriving the target from the
+ * target-side chain makes the two agree by construction. 足ＩＫ binds at the
+ * ankle and drives 足首, so the ankle is what is solved for — the toe's
+ * displacement never belonged here.
+ *
+ * GROUND. Heights are measured from each point's OWN bind height, which is the
+ * height this model stands at, so 0 is the floor and no per-model calibration is
+ * needed to find it. The lift is whichever END of either foot is deepest through
+ * the floor — never the ankle alone, because a foot that pitches onto its toe
+ * lifts the ankle while the toe stays planted, and an ankle-only test both
+ * misses that penetration and invents one for a character standing on her toes.
+ *
+ * The lift goes on the BODY, not the foot. Raising a foot to the floor moves an
+ * IK target, and the solver answers by re-bending that knee; raising センター
+ * moves everything together and leaves every joint angle exactly as retargeted.
+ * Sinking is all that is corrected: a foot ABOVE the floor is a jump as often as
+ * an error, and pulling one down lands the character mid-leap.
+ */
+function footIKFromTargetFK(
+	out: RetargetedClip,
+	targetPositions: Record<string, V3>,
+): { tracks: RetargetedPositionTrack[]; lift: number[] } {
+	const center = out.positionTracks.find(t => t.name === 'センター');
+	const rotOf = new Map(out.boneTracks.map(t => [t.name, t.quats]));
+	const tracks: RetargetedPositionTrack[] = [];
+	const lift: number[] = [];
+	// The lift is decided by BOTH feet, so contact cannot be judged until every
+	// side has been walked. Hence the raw pass here and the pin pass below.
+	const walked: { existing: RetargetedPositionTrack; positions: Vec3[]; low: number[]; band: number }[] = [];
+
+	for (const side of ['左', '右']) {
+		const ikName = `${side}足ＩＫ`;
+		const existing = out.positionTracks.find(t => t.name === ikName);
+		if (!existing) continue;
+		// The ankle is what 足ＩＫ solves for, so the chain that PLACES it stops at
+		// ひざ — 足首's own rotation turns the foot without moving it. One link
+		// further reaches the toe, which is what the ground test needs.
+		const chain = ['下半身', `${side}足`, `${side}ひざ`, `${side}足首`, `${side}足先EX`];
+		if (chain.some(b => !targetPositions[b])) continue;
+
+		const ankleBind = targetPositions[`${side}足首`];
+		const toeBind = targetPositions[`${side}足先EX`];
+		const positions: Vec3[] = [];
+		const low: number[] = [];
+
+		for (let f = 0; f < existing.positions.length; f++) {
+			// Walk this model's OWN bind offsets under the retargeted rotations.
+			let acc: Q4 = [0, 0, 0, 1];
+			let pos: V3 = [...targetPositions[chain[0]]] as V3;
+			let ankleAt: V3 = pos;
+			for (let i = 0; i < chain.length - 1; i++) {
+				const q = rotOf.get(chain[i])?.[f];
+				if (q) acc = q4Normalize(q4Mul(acc, [q.x, q.y, q.z, q.w]));
+				const a = targetPositions[chain[i]];
+				const b = targetPositions[chain[i + 1]];
+				const seg = q4Rot(acc, [b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+				pos = [pos[0] + seg[0], pos[1] + seg[1], pos[2] + seg[2]];
+				if (chain[i + 1] === `${side}足首`) ankleAt = pos;
+			}
+			// 足ＩＫ hangs off 全ての親, not センター, so the body's own travel has
+			// to be carried here too.
+			const c = center?.positions[f];
+			const cy = c?.y ?? 0;
+			positions.push(new Vec3(
+				ankleAt[0] - ankleBind[0] + (c?.x ?? 0),
+				ankleAt[1] - ankleBind[1] + cy,
+				ankleAt[2] - ankleBind[2] + (c?.z ?? 0),
+			));
+			low.push(Math.min(ankleAt[1] - ankleBind[1], pos[1] - toeBind[1]) + cy);
+			lift[f] = Math.max(lift[f] ?? 0, -low[f], 0);
+		}
+		const hip = targetPositions[`${side}足`];
+		const legLength = Math.hypot(hip[0] - ankleBind[0], hip[1] - ankleBind[1], hip[2] - ankleBind[2]);
+		walked.push({ existing, positions, low, band: legLength * 0.03 });
+	}
+
+	for (const w of walked) {
+		const grounded = w.low.map((y, f) => y + (lift[f] ?? 0) <= w.band);
+		tracks.push({ ...w.existing, positions: pinPlantedFoot(w.positions, grounded, w.band / 0.03) });
+	}
+	return { tracks, lift };
+}
+
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
 	const { core, trackByCanonical, duration, frameFixDeg, frameFixDeclinedDeg, bindFromFile } = buildFbxCore(clip, opts);
 	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts, bindFromFile, frameFixDeclinedDeg);
-	const out = retargetCoreClip(core, clip.name);
+	let out = retargetCoreClip(core, clip.name);
+	if (opts?.footIK && opts.targetPositions) {
+		const { tracks, lift } = footIKFromTargetFK(out, opts.targetPositions);
+		if (tracks.length > 0) {
+			// One rise for the whole body, applied to センター and carried by the
+			// foot targets so the two stay in step.
+			const byName = new Map(tracks.map(t => [t.name, t]));
+			out = {
+				...out,
+				positionTracks: out.positionTracks.map(t => {
+					const src = byName.get(t.name) ?? t;
+					const raise = t.name === 'センター' || byName.has(t.name);
+					if (!raise) return src;
+					return { ...src, positions: src.positions.map((p, f) => new Vec3(p.x, p.y + (lift[f] ?? 0), p.z)) };
+				}),
+			};
+		}
+	}
 	// In place: センター loses its horizontal path outright; every other exported
 	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
 	// oscillating around the body instead of running off without it.
