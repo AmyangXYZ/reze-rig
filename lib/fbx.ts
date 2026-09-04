@@ -881,13 +881,27 @@ class AnimationParser {
 			}
 		}
 
-		// Generate quaternion track
-		if (!curves.x || !curves.y || !curves.z) return null;
+		// Generate quaternion track with default values for missing axes
+		// Some FBX files only animate certain axes (e.g., Y and Z but not X).
+		// Provide synthetic curves with zero rotation for missing axes.
+		const hasAnyAxis = curves.x || curves.y || curves.z;
+		if (!hasAnyAxis) return null;
+
+		// Merge all times from available curves
+		const allTimes = new Set<number>();
+		[curves.x, curves.y, curves.z].forEach(c => {
+			if (c) c.times.forEach(t => allTimes.add(t));
+		});
+		const mergedTimes = Array.from(allTimes).sort((a, b) => a - b);
+		if (mergedTimes.length === 0) return null;
+
+		// For missing axes, create synthetic curves with zero values at all times
+		const x = curves.x || { times: mergedTimes, values: new Array(mergedTimes.length).fill(0) };
+		const y = curves.y || { times: mergedTimes, values: new Array(mergedTimes.length).fill(0) };
+		const z = curves.z || { times: mergedTimes, values: new Array(mergedTimes.length).fill(0) };
 
 		const { times, quats } = this.generateQuaternions({
-			x: curves.x,
-			y: curves.y,
-			z: curves.z
+			x, y, z
 		}, preRotation, postRotation, eulerOrder);
 		if (quats.length === 0) return null;
 
@@ -985,22 +999,29 @@ class AnimationParser {
 			}
 		}
 
-		if (!curves.x || !curves.y || !curves.z) return null;
-		if (curves.x.values.length === 0 || curves.y.values.length === 0 || curves.z.values.length === 0) return null;
+		// Handle partial axis animation: fill in missing axes with zero values
+		const hasAnyAxis = curves.x || curves.y || curves.z;
+		if (!hasAnyAxis) return null;
 
 		const roundTime = (t: number) => Math.round(t * 1000000) / 1000000;
 		const allTimes = new Set<number>();
-		curves.x.times.forEach(t => allTimes.add(roundTime(t)));
-		curves.y.times.forEach(t => allTimes.add(roundTime(t)));
-		curves.z.times.forEach(t => allTimes.add(roundTime(t)));
+		if (curves.x) curves.x.times.forEach(t => allTimes.add(roundTime(t)));
+		if (curves.y) curves.y.times.forEach(t => allTimes.add(roundTime(t)));
+		if (curves.z) curves.z.times.forEach(t => allTimes.add(roundTime(t)));
 		const times = Array.from(allTimes).sort((a, b) => a - b);
+		if (times.length === 0) return null;
+
+		// For missing axes, create synthetic curves with zero values
+		const x = curves.x || { times, values: new Array(times.length).fill(0) };
+		const y = curves.y || { times, values: new Array(times.length).fill(0) };
+		const z = curves.z || { times, values: new Array(times.length).fill(0) };
 
 		const positions: [number, number, number][] = [];
 		for (const time of times) {
-			const x = this.interpolateValue(curves.x.times, curves.x.values, time);
-			const y = this.interpolateValue(curves.y.times, curves.y.values, time);
-			const z = this.interpolateValue(curves.z.times, curves.z.values, time);
-			positions.push([x, y, z]);
+			const xVal = this.interpolateValue(x.times, x.values, time);
+			const yVal = this.interpolateValue(y.times, y.values, time);
+			const zVal = this.interpolateValue(z.times, z.values, time);
+			positions.push([xVal, yVal, zVal]);
 		}
 
 		if (positions.length === 0) return null;
