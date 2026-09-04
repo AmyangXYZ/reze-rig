@@ -1206,10 +1206,7 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 				if (t.mmdBone === '右足ＩＫ') t.srcBone = 'RightFoot';
 			});
 		} else {
-			console.log(`[foot-ik] no heel, using toe-based IK, adjusting toe Y down by ${avgFootHeight.toFixed(3)}`);
-			// Lower toe position by foot height so IK targets ground contact, not the ball of foot
-			if (targetPositions['左足先EX']) targetPositions['左足先EX'][1] -= left.footHeight;
-			if (targetPositions['右足先EX']) targetPositions['右足先EX'][1] -= right.footHeight;
+			console.log(`[foot-ik] no heel, using toe-based IK`);
 		}
 	}
 
