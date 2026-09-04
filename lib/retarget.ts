@@ -238,11 +238,19 @@ function canonicalizeBoneName(rawName: string): string {
 		const mapped = CC_TO_MIXAMO[cc[1].trim().toLowerCase()];
 		if (mapped) return mapped;
 	}
-	// 3ds Max Biped: "Bip001 L Thigh" / "Bip01_Spine1" — strip the Bip prefix,
-	// normalize separators, look up. The bare "Bip001" root stays unmapped.
-	const bip = stripped.match(/^bip\d*[\s_]+(.+)$/i);
+	// 3ds Max Biped: "Bip001 L Thigh" / "Bip01_Spine1" / "Bip001LThigh" (concatenated)
+	// Strip the Bip prefix, normalize separators, look up. The bare "Bip001" root stays unmapped.
+	const bip = stripped.match(/^bip\d*([\s_]*)(.+)$/i);
 	if (bip) {
-		const key = bip[1].replace(/[\s_]+/g, ' ').trim().toLowerCase();
+		let part = bip[2];
+		// For concatenated names like "LThigh", insert space before uppercase letters
+		// that follow lowercase or are part of a "L"/"R" prefix (e.g., "LThigh" → "l thigh", "Pelvis" → "pelvis")
+		if (!bip[1]) {
+			// No separator in original, likely concatenated: "LThigh", "RFinger01", etc.
+			// Insert spaces before capital letters (except the first)
+			part = part.replace(/([a-z])([A-Z])/g, '$1 $2');
+		}
+		const key = part.replace(/[\s_]+/g, ' ').trim().toLowerCase();
 		const mapped = BIPED_TO_MIXAMO[key];
 		if (mapped) return mapped;
 	}
