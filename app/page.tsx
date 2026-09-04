@@ -368,7 +368,7 @@ export default function Home() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=""
+            accept=".fbx"
             onChange={handleFileChange}
             className="hidden"
           />
