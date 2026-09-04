@@ -243,12 +243,17 @@ function canonicalizeBoneName(rawName: string): string {
 	const bip = stripped.match(/^bip\d*([\s_]*)(.+)$/i);
 	if (bip) {
 		let part = bip[2];
-		// For concatenated names like "LThigh", insert space before uppercase letters
-		// that follow lowercase or are part of a "L"/"R" prefix (e.g., "LThigh" → "l thigh", "Pelvis" → "pelvis")
+		// For concatenated names like "LThigh" or "RFinger01", insert space before uppercase letters
+		// Pattern: single capital (L/R/M) followed by another capital starts a new word
+		// Also handle: lowercase followed by capital (e.g., "Spine1" → "spine1")
 		if (!bip[1]) {
-			// No separator in original, likely concatenated: "LThigh", "RFinger01", etc.
-			// Insert spaces before capital letters (except the first)
-			part = part.replace(/([a-z])([A-Z])/g, '$1 $2');
+			// No separator: "LThigh", "RFinger01", "Pelvis", "Spine1", etc.
+			// Insert space before: (1) capital following single capital [L/R/M], (2) capital following lowercase
+			part = part
+				// LThigh → L Thigh, RFinger → R Finger, MBone → M Bone
+				.replace(/^([LRM])([A-Z])/i, '$1 $2')
+				// Spine1 → Spine 1, Finger01 → Finger 01 (only if digit follows capital+lowercase)
+				.replace(/([a-z])([A-Z])/g, '$1 $2');
 		}
 		const key = part.replace(/[\s_]+/g, ' ').trim().toLowerCase();
 		const mapped = BIPED_TO_MIXAMO[key];
