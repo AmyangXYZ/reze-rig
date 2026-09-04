@@ -41,6 +41,7 @@ function Button({
   variant = "default",
   size = "default",
   asChild = false,
+  onClick,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
@@ -48,12 +49,22 @@ function Button({
   }) {
   const Comp = asChild ? Slot : "button"
 
+  // A clicked button keeps focus, and a focused button eats the space bar —
+  // which is the transport's play/pause. Drop focus after a POINTER click only:
+  // a click synthesised from the keyboard reports detail 0, and taking focus off
+  // that one would strand anyone tabbing through.
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (e.detail > 0) e.currentTarget.blur()
+    onClick?.(e)
+  }
+
   return (
     <Comp
       data-slot="button"
       data-variant={variant}
       data-size={size}
       className={cn(buttonVariants({ variant, size, className }))}
+      onClick={handleClick}
       {...props}
     />
   )
