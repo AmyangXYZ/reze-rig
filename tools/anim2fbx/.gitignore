@@ -1,0 +1,11 @@
+# Unity's regenerable caches — 100MB+, rebuilt on first run.
+project/Library/
+project/Logs/
+project/Temp/
+project/UserSettings/
+project/obj/
+*.csproj
+*.sln
+
+# Clips are staged here per run and removed afterwards.
+project/Assets/Clips/
