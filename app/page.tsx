@@ -15,7 +15,6 @@ import {
 import { SourceInset } from "@/components/source-inset"
 import type { AnimationClip, BoneRestPose } from "@/lib/fbx"
 import { downloadArrayBuffer, toEngineClip } from "@/lib/engine-clip"
-import { unzipToFiles } from "@/lib/uploads"
 import { AnimPlayer } from "@/components/anim-player"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
@@ -183,12 +182,11 @@ export default function Home() {
     }
   }, [convertAndPlay])
 
-  const handleModelZip = useCallback(async (file: File) => {
+  const handleModelFolder = useCallback(async (files: File[]) => {
     try {
-      const files = await unzipToFiles(file)
       const pmxs = files.filter((f) => f.name.toLowerCase().endsWith(".pmx"))
       if (pmxs.length === 0) {
-        window.alert("No .pmx file found in this zip.")
+        window.alert("No .pmx file found in this folder.")
         return
       }
       if (pmxs.length === 1) {
@@ -343,14 +341,14 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Target model swap (PMX zip) — separate from the motion in/out pair */}
+          {/* Target model swap (PMX folder) — separate from the motion in/out pair */}
           <input
             ref={modelInputRef}
             type="file"
-            accept=".zip,application/zip"
+            webkitdirectory=""
             onChange={(e) => {
-              const file = e.target.files?.[0]
-              if (file) void handleModelZip(file)
+              const files = Array.from(e.target.files ?? [])
+              if (files.length > 0) void handleModelFolder(files)
               e.target.value = ""
             }}
             className="hidden"
