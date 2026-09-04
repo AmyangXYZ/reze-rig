@@ -124,6 +124,18 @@ export interface TranslationExport {
    * whole-body turns don't skew it. Omit for world-frame roots.
    */
   frameOfMmdBone?: string
+  /**
+   * Split the displacement against this bone: what this bone does RELATIVE to
+   * it rides at `scale`, the rest at the context scale.
+   *
+   * A limb end and the body carrying it do not scale by the same ratio. Two
+   * skeletons can agree on hip height and still disagree on leg length, and a
+   * stride scaled by the hip ratio then asks for more reach than the target
+   * leg has — the IK solver cannot land it and snaps straight for that frame.
+   */
+  relativeToSrcBone?: string
+  /** Scale for the relative part. Defaults to the context scale. */
+  scale?: number
 }
 
 export interface RetargetCoreOptions {
@@ -170,7 +182,7 @@ export interface RetargetCoreContext {
   /** Source bind world positions (one per source bone). */
   bindWorldPos: V3[]
   positionScale: number
-  translationExports: (TranslationExport & { srcIdx: number; subtractSrcIdx: number })[]
+  translationExports: (TranslationExport & { srcIdx: number; subtractSrcIdx: number; relativeToSrcIdx: number })[]
   refPoseBias: Record<string, Q4>
 }
 
@@ -389,7 +401,8 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
     if (srcIdx === undefined) return []
     const subtractSrcIdx = t.subtractSrcBone !== undefined ? nameToIdx.get(t.subtractSrcBone) ?? -1 : -1
     if (t.subtractSrcBone !== undefined && subtractSrcIdx < 0) return []
-    return [{ ...t, srcIdx, subtractSrcIdx }]
+    const relativeToSrcIdx = t.relativeToSrcBone !== undefined ? nameToIdx.get(t.relativeToSrcBone) ?? -1 : -1
+    return [{ ...t, srcIdx, subtractSrcIdx, relativeToSrcIdx }]
   })
 
   return {
@@ -463,11 +476,26 @@ export function retargetCoreFrame(ctx: RetargetCoreContext, frameIdx: number): F
         const sb = bindWorldPos[t.subtractSrcIdx]
         d = [d[0] - (sw[0] - sb[0]), d[1] - (sw[1] - sb[1]), d[2] - (sw[2] - sb[2])]
       }
+      const s = t.scale ?? ctx.positionScale
+      if (t.relativeToSrcIdx >= 0) {
+        const rw = worldPos[t.relativeToSrcIdx]
+        const rb = bindWorldPos[t.relativeToSrcIdx]
+        const cx = rw[0] - rb[0]
+        const cy = rw[1] - rb[1]
+        const cz = rw[2] - rb[2]
+        d = [
+          (d[0] - cx) * s + cx * ctx.positionScale,
+          (d[1] - cy) * s + cy * ctx.positionScale,
+          (d[2] - cz) * s + cz * ctx.positionScale,
+        ]
+      } else {
+        d = [d[0] * s, d[1] * s, d[2] * s]
+      }
       if (t.frameOfMmdBone) {
         const frame = targetByMmd[t.frameOfMmdBone]
         if (frame) d = q4Rot(q4Conj(frame), d)
       }
-      positions[t.mmdBone] = new Vec3(d[0] * ctx.positionScale, d[1] * ctx.positionScale, d[2] * ctx.positionScale)
+      positions[t.mmdBone] = new Vec3(d[0], d[1], d[2])
     }
   }
 

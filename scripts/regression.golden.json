@@ -7,7 +7,7 @@
     "bindMissing": false,
     "frames": 72,
     "rotationSum": 4498.6005,
-    "translationSum": -31.6567
+    "translationSum": -38.8702
   },
   "public/fbx/Snake Hip Hop Dance.fbx": {
     "profile": "Mixamo",
@@ -17,7 +17,7 @@
     "bindMissing": false,
     "frames": 459,
     "rotationSum": 28586.0892,
-    "translationSum": -3500.7415
+    "translationSum": -3450.388
   },
   "public/fbx/Taunt.fbx": {
     "profile": "Mixamo",
@@ -27,7 +27,7 @@
     "bindMissing": false,
     "frames": 86,
     "rotationSum": 6030.0002,
-    "translationSum": -268.5315
+    "translationSum": -367.5589
   },
   "public/fbx/Arms Down.fbx": {
     "profile": "Mixamo",
@@ -37,7 +37,7 @@
     "bindMissing": false,
     "frames": 2,
     "rotationSum": 124.8532,
-    "translationSum": 3.386
+    "translationSum": 4.1688
   },
   "public/fbx/Idle.fbx": {
     "profile": "UE / Unity",
@@ -47,7 +47,7 @@
     "bindMissing": false,
     "frames": 91,
     "rotationSum": 4986.9764,
-    "translationSum": -21.9225
+    "translationSum": -30.7077
   },
   "public/fbx/Run_Lfoot.fbx": {
     "profile": "UE / Unity",
@@ -57,7 +57,7 @@
     "bindMissing": false,
     "frames": 21,
     "rotationSum": 1562.2928,
-    "translationSum": -1264.8818
+    "translationSum": -1248.3517
   },
   "public/fbx/Run_Start_L0.fbx": {
     "profile": "UE / Unity",
@@ -67,7 +67,7 @@
     "bindMissing": false,
     "frames": 35,
     "rotationSum": 2499.3606,
-    "translationSum": -628.7176
+    "translationSum": -632.7676
   },
   "public/fbx/Run_Start_R180.fbx": {
     "profile": "UE / Unity",
@@ -77,7 +77,7 @@
     "bindMissing": false,
     "frames": 35,
     "rotationSum": 2494.9128,
-    "translationSum": 650.0582
+    "translationSum": 692.779
   },
   "public/fbx/Run_Stop_Lfoot.fbx": {
     "profile": "UE / Unity",
@@ -87,7 +87,7 @@
     "bindMissing": false,
     "frames": 67,
     "rotationSum": 4515.1498,
-    "translationSum": -6151.9551
+    "translationSum": -6126.4244
   },
   "public/fbx/dance-graceful.json": {
     "profile": "Character Creator",
@@ -97,6 +97,6 @@
     "bindMissing": false,
     "frames": 697,
     "rotationSum": 45500.5368,
-    "translationSum": -612.2785
+    "translationSum": -379.0783
   }
 }

@@ -970,6 +970,46 @@ interface FbxCore {
 	bindFromFile: boolean
 }
 
+/**
+ * Target leg length ÷ source leg length, averaged over both sides.
+ *
+ * Hip to toe in a straight line at bind, rather than a sum of segments: the
+ * bind leg is straight, so the two agree, and the straight line survives a rig
+ * that splits the shin with twist helpers or omits a toe. Null when either
+ * skeleton is missing an end of the chain, which leaves the hip ratio in place.
+ */
+function measureLegScale(
+	core: RetargetCoreContext,
+	idxByCanonical: Map<string, number>,
+	targetPositions: Record<string, V3> | null | undefined,
+): number | null {
+	if (!targetPositions) return null;
+	const span = (a: V3 | undefined, b: V3 | undefined): number =>
+		a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : 0;
+	const srcAt = (name: string): V3 | undefined => {
+		const i = idxByCanonical.get(name);
+		return i === undefined ? undefined : core.bindWorldPos[i];
+	};
+	let srcTotal = 0;
+	let tgtTotal = 0;
+	for (const [hip, toe, ankle, mHip, mToe, mAnkle] of [
+		['LeftUpLeg', 'LeftToeBase', 'LeftFoot', '左足', '左足先EX', '左足首'],
+		['RightUpLeg', 'RightToeBase', 'RightFoot', '右足', '右足先EX', '右足首'],
+	]) {
+		// Prefer the toe — that IS the IK target — and fall back to the ankle for
+		// rigs with no toe bone.
+		const src = span(srcAt(hip), srcAt(toe)) || span(srcAt(hip), srcAt(ankle));
+		const tgt =
+			span(targetPositions[mHip], targetPositions[mToe]) ||
+			span(targetPositions[mHip], targetPositions[mAnkle]);
+		if (src <= 1e-4 || tgt <= 1e-4) continue;
+		srcTotal += src;
+		tgtTotal += tgt;
+	}
+	if (srcTotal <= 1e-4 || tgtTotal <= 1e-4) return null;
+	return tgtTotal / srcTotal;
+}
+
 /** Parse one clip into a retarget-ready source skeleton + core context. */
 function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 	const duration = calculateDuration(clip);
@@ -1160,8 +1200,8 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 			...(hipsCarriesTranslation ? [{ srcBone: 'Hips', mmdBone: 'センター' }] : []),
 			...(opts?.footIK
 				? [
-					{ srcBone: 'LeftToeBase', mmdBone: '左足ＩＫ' },
-					{ srcBone: 'RightToeBase', mmdBone: '右足ＩＫ' },
+					{ srcBone: 'LeftToeBase', mmdBone: '左足ＩＫ', relativeToSrcBone: 'Hips' },
+					{ srcBone: 'RightToeBase', mmdBone: '右足ＩＫ', relativeToSrcBone: 'Hips' },
 				]
 				: []),
 		],
@@ -1177,36 +1217,16 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
-	// Foot IK: measure target model's foot structure and ground contact
-	// The foot IK target should be placed at ground contact point, not at the toe bone position.
-	// Calculate the Y offset (vertical distance from ankle to actual ground/contact).
-	if (opts?.footIK && targetPositions) {
-		const measureFootGeometry = (ankleKey: string, toeKey: string): { heelZ: number; footHeight: number } => {
-			const ankle = targetPositions[ankleKey];
-			const toe = targetPositions[toeKey];
-			if (!ankle || !toe) return { heelZ: 0, footHeight: 0 };
-			// Heel offset: how far back (in Z) the ankle is from toe
-			const heelZ = Math.max(0, toe[2] - ankle[2]);
-			// Foot height: vertical distance from toe to ankle (how high toe is above ground)
-			const footHeight = Math.max(0, ankle[1] - toe[1]);
-			return { heelZ, footHeight };
-		};
-		const left = measureFootGeometry('左足首', '左足先EX');
-		const right = measureFootGeometry('右足首', '右足先EX');
-		const avgHeelZ = (left.heelZ + right.heelZ) / 2;
-		const avgFootHeight = (left.footHeight + right.footHeight) / 2;
-
-		console.log(`[foot-ik] target foot geometry: heel=${avgHeelZ.toFixed(3)}, height=${avgFootHeight.toFixed(3)}`);
-
-		// If target has significant heel offset, adjust source bone to foot instead of toe
-		if (avgHeelZ > 0.1) {
-			console.log(`[foot-ik] detected heel (${avgHeelZ.toFixed(3)}), using foot-based IK`);
-			core.translationExports.forEach(t => {
-				if (t.mmdBone === '左足ＩＫ') t.srcBone = 'LeftFoot';
-				if (t.mmdBone === '右足ＩＫ') t.srcBone = 'RightFoot';
-			});
-		} else {
-			console.log(`[foot-ik] no heel, using toe-based IK`);
+	// The feet ride at the LEG ratio, not the hip-height one. Hip height and leg
+	// length disagree between rigs — this model's legs are 79% of its hip height
+	// against a typical source's 95% — so a stride scaled by hip height asks the
+	// target leg for reach it does not have, and the solver snaps it straight for
+	// whichever frame is most extended. Only the hip-relative part is rescaled;
+	// the body's own travel still rides at positionScale, with センター.
+	const legScale = measureLegScale(core, idxByCanonical, targetPositions);
+	if (legScale !== null) {
+		for (const t of core.translationExports) {
+			if (t.relativeToSrcIdx >= 0) t.scale = legScale;
 		}
 	}
 
