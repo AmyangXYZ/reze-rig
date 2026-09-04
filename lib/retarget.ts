@@ -1192,13 +1192,18 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		const rightHeelOffset = measureFootOffset('右足首', '右足先EX');
 		const targetHeelOffset = (leftHeelOffset + rightHeelOffset) / 2;
 
+		console.log(`[foot-ik] target heel offset: ${targetHeelOffset.toFixed(3)} (L: ${leftHeelOffset.toFixed(3)}, R: ${rightHeelOffset.toFixed(3)})`);
+
 		// If target has significant heel offset, adjust source bone to foot instead of toe
 		if (targetHeelOffset > 0.1) {
 			// Target has a heel: use foot-based IK
+			console.log(`[foot-ik] detected heel, using foot-based IK`);
 			core.translationExports.forEach(t => {
 				if (t.mmdBone === '左足ＩＫ') t.srcBone = 'LeftFoot';
 				if (t.mmdBone === '右足ＩＫ') t.srcBone = 'RightFoot';
 			});
+		} else {
+			console.log(`[foot-ik] no heel detected, using toe-based IK`);
 		}
 	}
 
