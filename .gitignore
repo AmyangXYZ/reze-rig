@@ -52,3 +52,6 @@ scripts/.dump-run.mjs
 
 # User-reported problem files (not distributed)
 /public/fbx/issue/
+
+# Demo model; served from the bucket in a deployed build.
+/public/models/
