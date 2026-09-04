@@ -1177,33 +1177,39 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
 		if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
 	}
 
-	// Foot IK: auto-detect target model's heel status
-	// Measure ankle-to-toe distance. If significant heel offset exists (ankle ahead of toe),
-	// blend IK target between toe (no heel) and ankle (with heel) based on target's geometry.
+	// Foot IK: measure target model's foot structure and ground contact
+	// The foot IK target should be placed at ground contact point, not at the toe bone position.
+	// Calculate the Y offset (vertical distance from ankle to actual ground/contact).
 	if (opts?.footIK && targetPositions) {
-		const measureFootOffset = (ankleKey: string, toeKey: string): number => {
+		const measureFootGeometry = (ankleKey: string, toeKey: string): { heelZ: number; footHeight: number } => {
 			const ankle = targetPositions[ankleKey];
 			const toe = targetPositions[toeKey];
-			if (!ankle || !toe) return 0;
-			// Heel offset: how far back (in Z) the ankle is from toe. Positive = heel exists.
-			return Math.max(0, toe[2] - ankle[2]); // toe_z - ankle_z (left-handed Y-up, Z is depth)
+			if (!ankle || !toe) return { heelZ: 0, footHeight: 0 };
+			// Heel offset: how far back (in Z) the ankle is from toe
+			const heelZ = Math.max(0, toe[2] - ankle[2]);
+			// Foot height: vertical distance from toe to ankle (how high toe is above ground)
+			const footHeight = Math.max(0, ankle[1] - toe[1]);
+			return { heelZ, footHeight };
 		};
-		const leftHeelOffset = measureFootOffset('左足首', '左足先EX');
-		const rightHeelOffset = measureFootOffset('右足首', '右足先EX');
-		const targetHeelOffset = (leftHeelOffset + rightHeelOffset) / 2;
+		const left = measureFootGeometry('左足首', '左足先EX');
+		const right = measureFootGeometry('右足首', '右足先EX');
+		const avgHeelZ = (left.heelZ + right.heelZ) / 2;
+		const avgFootHeight = (left.footHeight + right.footHeight) / 2;
 
-		console.log(`[foot-ik] target heel offset: ${targetHeelOffset.toFixed(3)} (L: ${leftHeelOffset.toFixed(3)}, R: ${rightHeelOffset.toFixed(3)})`);
+		console.log(`[foot-ik] target foot geometry: heel=${avgHeelZ.toFixed(3)}, height=${avgFootHeight.toFixed(3)}`);
 
 		// If target has significant heel offset, adjust source bone to foot instead of toe
-		if (targetHeelOffset > 0.1) {
-			// Target has a heel: use foot-based IK
-			console.log(`[foot-ik] detected heel, using foot-based IK`);
+		if (avgHeelZ > 0.1) {
+			console.log(`[foot-ik] detected heel (${avgHeelZ.toFixed(3)}), using foot-based IK`);
 			core.translationExports.forEach(t => {
 				if (t.mmdBone === '左足ＩＫ') t.srcBone = 'LeftFoot';
 				if (t.mmdBone === '右足ＩＫ') t.srcBone = 'RightFoot';
 			});
 		} else {
-			console.log(`[foot-ik] no heel detected, using toe-based IK`);
+			console.log(`[foot-ik] no heel, using toe-based IK, adjusting toe Y down by ${avgFootHeight.toFixed(3)}`);
+			// Lower toe position by foot height so IK targets ground contact, not the ball of foot
+			if (targetPositions['左足先EX']) targetPositions['左足先EX'][1] -= left.footHeight;
+			if (targetPositions['右足先EX']) targetPositions['右足先EX'][1] -= right.footHeight;
 		}
 	}
 
