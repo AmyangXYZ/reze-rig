@@ -1389,39 +1389,27 @@ function footIKFromTargetFK(
 	return { tracks, lift };
 }
 
-/**
- * Stand a clip on the target model's floor: rebuild its foot-IK targets, raise
- * the body until the lower foot clears the ground, and pin whichever foot is
- * standing on it.
- *
- * Takes a clip already in MMD bone space, so it serves the FBX conversion and a
- * VMD arriving ready-made alike. It reads the leg's own rotations, which is to
- * say it treats the clip's FK as the truth about where the legs are — true of
- * anything this tool wrote and of motion capture, which solves joint angles.
- * A VMD posed purely by dragging IK handles, with its 足/ひざ keys left wherever
- * they fell, is the case this cannot help.
- */
-export function groundClip(clip: RetargetedClip, targetPositions: Record<string, V3>): RetargetedClip {
-	const { tracks, lift } = footIKFromTargetFK(clip, targetPositions);
-	if (tracks.length === 0) return clip;
-	// One rise for the whole body, applied to センター and carried by the foot
-	// targets so the two stay in step.
-	const byName = new Map(tracks.map(t => [t.name, t]));
-	return {
-		...clip,
-		positionTracks: clip.positionTracks.map(t => {
-			const src = byName.get(t.name) ?? t;
-			if (t.name !== 'センター' && !byName.has(t.name)) return src;
-			return { ...src, positions: src.positions.map((p, f) => new Vec3(p.x, p.y + (lift[f] ?? 0), p.z)) };
-		}),
-	};
-}
-
 function retargetOneClip(clip: AnimationClip, opts?: RetargetOptions): RetargetedClip {
 	const { core, trackByCanonical, duration, frameFixDeg, frameFixDeclinedDeg, bindFromFile } = buildFbxCore(clip, opts);
 	reportOnce(clip, core, trackByCanonical, frameFixDeg, opts, bindFromFile, frameFixDeclinedDeg);
 	let out = retargetCoreClip(core, clip.name);
-	if (opts?.footIK && opts.targetPositions) out = groundClip(out, opts.targetPositions);
+	if (opts?.footIK && opts.targetPositions) {
+		const { tracks, lift } = footIKFromTargetFK(out, opts.targetPositions);
+		if (tracks.length > 0) {
+			// One rise for the whole body, applied to センター and carried by the
+			// foot targets so the two stay in step.
+			const byName = new Map(tracks.map(t => [t.name, t]));
+			out = {
+				...out,
+				positionTracks: out.positionTracks.map(t => {
+					const src = byName.get(t.name) ?? t;
+					const raise = t.name === 'センター' || byName.has(t.name);
+					if (!raise) return src;
+					return { ...src, positions: src.positions.map((p, f) => new Vec3(p.x, p.y + (lift[f] ?? 0), p.z)) };
+				}),
+			};
+		}
+	}
 	// In place: センター loses its horizontal path outright; every other exported
 	// translation (the foot-IK targets) subtracts that SAME path, so feet keep
 	// oscillating around the body instead of running off without it.

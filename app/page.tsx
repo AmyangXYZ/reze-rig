@@ -15,7 +15,6 @@ import {
 import { SourceInset } from "@/components/source-inset"
 import type { AnimationClip, BoneRestPose } from "@/lib/fbx"
 import { downloadArrayBuffer, toEngineClip } from "@/lib/engine-clip"
-import { improveVmd } from "@/lib/vmd-improve"
 import { AnimPlayer } from "@/components/anim-player"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
@@ -287,34 +286,6 @@ export default function Home() {
     }
   }, [loadFBXAndPlay])
 
-  /** A VMD arrives already in MMD bone space, so it skips the retarget entirely
-   *  and only gets stood on this model's floor. */
-  const loadVmdAndPlay = useCallback(async (file: File) => {
-    const engine = engineRef.current
-    const model = modelRef.current
-    if (!engine || !model) return
-    setConverting(true)
-    try {
-      const targets = targetPositionsRef.current
-      if (!targets) throw new Error("Load a model first.")
-      const { clip, maxLift, addedFootIK } = improveVmd(await file.arrayBuffer(), targets)
-      model.loadClip("default", clip)
-      model.show("default")
-      engine.resetPhysics()
-      model.play()
-      lastSourceRef.current = null
-      setSourcePreview(null)
-      setVmdFileName(file.name.replace(/\.vmd$/i, "") + " (grounded).vmd")
-      setClipLoaded(true)
-      console.log(`[vmd] grounded: body rose ${maxLift.toFixed(2)}${addedFootIK ? ", foot IK added" : ""}`)
-    } catch (error) {
-      console.error("VMD improve failed:", error)
-      window.alert(error instanceof Error ? error.message : String(error))
-    } finally {
-      setConverting(false)
-    }
-  }, [])
-
   const handleFBXUpload = useCallback(async (file: File) => {
     const blobUrl = URL.createObjectURL(file)
     try {
@@ -326,14 +297,12 @@ export default function Home() {
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file && /\.vmd$/i.test(file.name)) {
-      void loadVmdAndPlay(file)
-    } else if (file && /\.(fbx|json)$/i.test(file.name)) {
+    if (file && /\.(fbx|json)$/i.test(file.name)) {
       handleFBXUpload(file)
     }
     // Reset input so same file can be selected again
     e.target.value = ''
-  }, [handleFBXUpload, loadVmdAndPlay])
+  }, [handleFBXUpload])
 
   const handleUploadClick = useCallback(() => {
     fileInputRef.current?.click()
@@ -416,7 +385,7 @@ export default function Home() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".fbx,.vmd"
+            accept=".fbx"
             onChange={handleFileChange}
             className="hidden"
           />
@@ -427,7 +396,7 @@ export default function Home() {
               size="sm"
               className="rounded-none"
             >
-              {converting ? "Converting..." : "Upload FBX / VMD"}
+              {converting ? "Converting..." : "Upload FBX"}
             </Button>
             <div className="h-6 w-px bg-white/15" />
             <Button
