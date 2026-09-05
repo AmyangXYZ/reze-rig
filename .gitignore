@@ -55,3 +55,6 @@ scripts/.dump-run.mjs
 
 # Demo model; served from the bucket in a deployed build.
 /public/models/
+
+# Working notes, not part of the published repo.
+/notes/
