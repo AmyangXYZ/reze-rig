@@ -2,42 +2,42 @@
   "public/fbx/Rumba Dancing.fbx": {
     "profile": "Mixamo",
     "mapped": 51,
-    "aligned": 48,
+    "aligned": 47,
     "scale": 0.1314,
     "bindMissing": false,
     "frames": 72,
-    "rotationSum": 4498.6005,
-    "translationSum": 29.4981
+    "rotationSum": 4457.5478,
+    "translationSum": -138.1086
   },
   "public/fbx/Snake Hip Hop Dance.fbx": {
     "profile": "Mixamo",
     "mapped": 51,
-    "aligned": 48,
+    "aligned": 47,
     "scale": 0.1314,
     "bindMissing": false,
     "frames": 459,
-    "rotationSum": 28586.0892,
-    "translationSum": -2933.9279
+    "rotationSum": 28410.1696,
+    "translationSum": -3927.3353
   },
   "public/fbx/Taunt.fbx": {
     "profile": "Mixamo",
     "mapped": 51,
-    "aligned": 48,
+    "aligned": 47,
     "scale": 0.1314,
     "bindMissing": false,
     "frames": 86,
-    "rotationSum": 6030.0002,
-    "translationSum": -183.5954
+    "rotationSum": 5991.0511,
+    "translationSum": -401.7111
   },
   "public/fbx/Arms Down.fbx": {
     "profile": "Mixamo",
     "mapped": 51,
-    "aligned": 48,
+    "aligned": 47,
     "scale": 0.1314,
     "bindMissing": false,
     "frames": 2,
-    "rotationSum": 124.8532,
-    "translationSum": 4.9794
+    "rotationSum": 123.5854,
+    "translationSum": 0.3378
   },
   "public/fbx/Idle.fbx": {
     "profile": "UE / Unity",

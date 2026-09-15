@@ -218,8 +218,15 @@ export interface RetargetedClip {
  * orientation, and an alignment offset on them swings every descendant's
  * POSITION (child orientations cancel via the parent-local subtraction,
  * positions don't) — it reads as a constant structural tilt.
+ *
+ * 下半身 is one of them. The direction from the pelvis pivot to the spine and
+ * hip joints hanging off it is set by where a rig places that pivot, not by
+ * the pose: skeletons standing identically upright come out 30° apart for
+ * Mixamo against the reze model, and pointing opposite ways for UE and
+ * Character Creator. The pelvis carries the source's rotation from its own
+ * bind.
  */
-const CONTROL_BONES = new Set(["全ての親", "センター"])
+const CONTROL_BONES = new Set(["全ての親", "センター", "下半身"])
 
 /* ============================================================================
  * FK helpers.
@@ -348,8 +355,8 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
     if (usable === 0) continue
     const lSrc = Math.hypot(dSrc[0], dSrc[1], dSrc[2])
     const lMmd = Math.hypot(dMmd[0], dMmd[1], dMmd[2])
-    // Tiny averages mean the children straddle the bone (下半身's legs + spine
-    // nearly cancel) — no meaningful segment direction.
+    // Tiny averages mean the children straddle the bone — no meaningful
+    // segment direction.
     if (lSrc < 1e-4 || lMmd < 1e-4) continue
     const uSrc: V3 = [dSrc[0] / lSrc, dSrc[1] / lSrc, dSrc[2] / lSrc]
     const uMmd: V3 = [dMmd[0] / lMmd, dMmd[1] / lMmd, dMmd[2] / lMmd]
