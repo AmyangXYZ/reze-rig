@@ -1260,37 +1260,106 @@ function buildFbxCore(clip: AnimationClip, opts?: RetargetOptions): FbxCore {
  * worst frame step on the demo dance). Sizing it by `d` bounds what pinning can
  * introduce. A span too short to absorb its own correction is left alone — a
  * foot that travels that far that fast is stepping, not skating.
+ *
+ * A span that runs to the clip's own edge does not ramp there. The ramp blends
+ * against the free flight on the other side of a lift-off, and at frame 0 or the
+ * last frame there is none — only the cut. Ramping to zero there restores the
+ * skate for a frame or two at each end, which on a clip that stands still the
+ * whole way (both feet planted, foot steps ~0.001) threw the foot 0.14 on the
+ * first and last frames and read as the leg flashing every time the loop
+ * restarted.
  */
-function pinPlantedFoot(positions: Vec3[], grounded: boolean[], legLength: number): Vec3[] {
+function pinPlantedFoot(positions: Vec3[], grounded: boolean[], legLength: number, loops: boolean): Vec3[] {
 	// What the correction may move the foot by in one frame.
 	const perFrame = legLength * 0.02;
+	const n = positions.length;
 	const out = positions.slice();
-	let i = 0;
-	while (i < out.length) {
+
+	// The contacts, as frame indices in the order they play.
+	const spans: number[][] = [];
+	for (let i = 0; i < n; ) {
 		if (!grounded[i]) { i++; continue; }
 		let j = i;
-		while (j + 1 < out.length && grounded[j + 1]) j++;
-		const span = j - i + 1;
-		if (span < 3) { i = j + 1; continue; }
+		while (j + 1 < n && grounded[j + 1]) j++;
+		const s: number[] = [];
+		for (let k = i; k <= j; k++) s.push(k);
+		spans.push(s);
+		i = j + 1;
+	}
+
+	// On a clip that ends where it began, a contact running through the last
+	// frame carries on into the first: one contact, so one place to pin it to.
+	// Pinning the two halves to their own averages steps the foot between them
+	// every time the loop comes round.
+	const wrapped = loops && spans.length > 1 && grounded[0] && grounded[n - 1];
+	if (wrapped) {
+		const head = spans.shift() as number[];
+		const tail = spans.pop() as number[];
+		// The last frame and the first are the same instant. Carry it once, or
+		// the two copies sit next to each other in the joined span and take
+		// weights one step apart, which is the step back at the loop again.
+		spans.push([...tail.slice(0, -1), ...head]);
+	}
+
+	for (let s = 0; s < spans.length; s++) {
+		const idx = spans[s];
+		const span = idx.length;
+		if (span < 3) continue;
 
 		let mx = 0;
 		let mz = 0;
-		for (let k = i; k <= j; k++) { mx += out[k].x; mz += out[k].z; }
+		for (const k of idx) { mx += out[k].x; mz += out[k].z; }
 		mx /= span;
 		mz /= span;
 
 		let pull = 0;
-		for (let k = i; k <= j; k++) pull = Math.max(pull, Math.hypot(out[k].x - mx, out[k].z - mz));
+		for (const k of idx) pull = Math.max(pull, Math.hypot(out[k].x - mx, out[k].z - mz));
 		const ramp = Math.ceil(pull / perFrame);
-		if (ramp > span / 2) { i = j + 1; continue; }
+		if (ramp > span / 2) continue;
 
-		for (let k = i; k <= j; k++) {
-			const w = ramp > 0 ? Math.min(1, Math.min(k - i, j - k) / ramp) : 1;
+		// Ramp against a real lift-off. A span reaching the clip's own edge has
+		// none there, only the cut — except a wrapped one, already joined above
+		// to the half it continues into, whose two ends are lift-offs again.
+		const atEdge = !(wrapped && s === spans.length - 1);
+		const openCut = atEdge && idx[0] === 0;
+		const closeCut = atEdge && idx[span - 1] === n - 1;
+		for (let p = 0; p < span; p++) {
+			const k = idx[p];
+			const edge = Math.min(openCut ? Infinity : p, closeCut ? Infinity : span - 1 - p);
+			const w = ramp > 0 ? Math.min(1, edge / ramp) : 1;
 			out[k] = new Vec3(out[k].x + (mx - out[k].x) * w, out[k].y, out[k].z + (mz - out[k].z) * w);
 		}
-		i = j + 1;
 	}
+	if (wrapped) out[n - 1] = out[0];
 	return out;
+}
+
+/**
+ * Does the clip end where it began?
+ *
+ * Decides whether the last frame and the first are the same instant, which is
+ * what makes a contact running through the end one contact rather than two. A
+ * one-shot — a run start, a transition — ends somewhere else entirely, and
+ * joining its ends would pin two unrelated footfalls together.
+ */
+function clipLoops(out: RetargetedClip, legLength: number): boolean {
+	let matched = false;
+	for (const t of out.boneTracks) {
+		const n = t.quats.length;
+		if (n < 2) continue;
+		const a = t.quats[0];
+		const b = t.quats[n - 1];
+		const dot = Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+		if (2 * Math.acos(Math.min(1, dot)) * (180 / Math.PI) > 2) return false;
+		matched = true;
+	}
+	const c = out.positionTracks.find(t => t.name === 'センター');
+	if (c && c.positions.length > 1) {
+		const a = c.positions[0];
+		const b = c.positions[c.positions.length - 1];
+		if (Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) > legLength * 0.02) return false;
+	}
+	return matched;
 }
 
 /**
@@ -1382,9 +1451,10 @@ function footIKFromTargetFK(
 		walked.push({ existing, positions, low, band: legLength * 0.03 });
 	}
 
+	const loops = walked.length > 0 && clipLoops(out, walked[0].band / 0.03);
 	for (const w of walked) {
 		const grounded = w.low.map((y, f) => y + (lift[f] ?? 0) <= w.band);
-		tracks.push({ ...w.existing, positions: pinPlantedFoot(w.positions, grounded, w.band / 0.03) });
+		tracks.push({ ...w.existing, positions: pinPlantedFoot(w.positions, grounded, w.band / 0.03, loops) });
 	}
 	return { tracks, lift };
 }

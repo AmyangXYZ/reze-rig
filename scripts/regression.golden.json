@@ -7,7 +7,7 @@
     "bindMissing": false,
     "frames": 72,
     "rotationSum": 4457.5478,
-    "translationSum": -138.1086
+    "translationSum": -150.6242
   },
   "public/fbx/Snake Hip Hop Dance.fbx": {
     "profile": "Mixamo",
@@ -17,7 +17,7 @@
     "bindMissing": false,
     "frames": 459,
     "rotationSum": 28410.1696,
-    "translationSum": -3927.3353
+    "translationSum": -3933.1437
   },
   "public/fbx/Taunt.fbx": {
     "profile": "Mixamo",
@@ -27,7 +27,7 @@
     "bindMissing": false,
     "frames": 86,
     "rotationSum": 5991.0511,
-    "translationSum": -401.7111
+    "translationSum": -401.6979
   },
   "public/fbx/Arms Down.fbx": {
     "profile": "Mixamo",
@@ -47,7 +47,7 @@
     "bindMissing": false,
     "frames": 91,
     "rotationSum": 4986.9764,
-    "translationSum": 10.581
+    "translationSum": 10.3855
   },
   "public/fbx/Run_Lfoot.fbx": {
     "profile": "UE / Unity",
@@ -67,7 +67,7 @@
     "bindMissing": false,
     "frames": 35,
     "rotationSum": 2499.3606,
-    "translationSum": -608.4847
+    "translationSum": -605.7558
   },
   "public/fbx/Run_Start_R180.fbx": {
     "profile": "UE / Unity",
@@ -77,7 +77,7 @@
     "bindMissing": false,
     "frames": 35,
     "rotationSum": 2494.9128,
-    "translationSum": 628.9525
+    "translationSum": 629.1849
   },
   "public/fbx/Run_Stop_Lfoot.fbx": {
     "profile": "UE / Unity",
@@ -87,7 +87,7 @@
     "bindMissing": false,
     "frames": 67,
     "rotationSum": 4515.1498,
-    "translationSum": -6147.6643
+    "translationSum": -6155.0401
   },
   "public/fbx/dance-graceful.json": {
     "profile": "Character Creator",
@@ -97,6 +97,6 @@
     "bindMissing": false,
     "frames": 697,
     "rotationSum": 45500.5368,
-    "translationSum": -1958.3843
+    "translationSum": -1958.4224
   }
 }
