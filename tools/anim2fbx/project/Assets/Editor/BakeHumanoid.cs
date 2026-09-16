@@ -16,12 +16,34 @@ using UnityEngine;
 /// then read.
 ///
 /// Driven by anim2fbx.sh: clips are staged in Assets/Clips, output goes to
-/// $BAKE_OUT, frame rate comes from $BAKE_FPS.
+/// $BAKE_OUT, frame rate comes from $BAKE_FPS, root handling from $BAKE_ROOT.
 /// </summary>
 public static class BakeHumanoid
 {
     const string RigPath = "Assets/XBot.fbx";
     const string ClipDir = "Assets/Clips";
+
+    /// <summary>
+    /// What to do with the root the capture was authored against.
+    ///
+    /// Sampling has no host to hand root motion to, so whatever the capture put
+    /// in the root stays in the body. Which of the two answers is right depends
+    /// on what the root is carrying.
+    /// </summary>
+    enum RootMode
+    {
+        /// Replace the root with a fixed heading and an even de-drift ramp. For
+        /// a cycle whose root carries only the heading it was captured along and
+        /// the travel a host was meant to consume — a run, a walk.
+        Flatten,
+
+        /// Read the heading off the body at frame 0 and fold the root into the
+        /// hips, leaving an identity root. For a performance that turns — a
+        /// spin, a step-around — and for anything authored with Root Transform
+        /// Rotation baked into pose, where the root is inert and the heading
+        /// lives in the body.
+        Keep,
+    }
 
     public static void Run()
     {
@@ -33,6 +55,21 @@ public static class BakeHumanoid
         var fpsEnv = System.Environment.GetEnvironmentVariable("BAKE_FPS");
         if (!string.IsNullOrEmpty(fpsEnv)) float.TryParse(fpsEnv, out fps);
         if (fps <= 0f) fps = 30f;
+
+        var rootEnv = System.Environment.GetEnvironmentVariable("BAKE_ROOT");
+        var rootMode = RootMode.Flatten;
+        if (!string.IsNullOrEmpty(rootEnv))
+        {
+            switch (rootEnv.Trim().ToLowerInvariant())
+            {
+                case "flatten": rootMode = RootMode.Flatten; break;
+                case "keep": rootMode = RootMode.Keep; break;
+                default:
+                    Debug.LogError("[bake] BAKE_ROOT must be 'flatten' or 'keep', got: " + rootEnv);
+                    EditorApplication.Exit(5);
+                    return;
+            }
+        }
 
         // The rig must be Humanoid, or there is no Avatar to read the muscles with.
         var importer = AssetImporter.GetAtPath(RigPath) as ModelImporter;
@@ -56,7 +93,8 @@ public static class BakeHumanoid
             EditorApplication.Exit(3);
             return;
         }
-        Debug.Log("[bake] rig=" + RigPath + " avatar=" + sourceAvatar.avatar.name + " fps=" + fps);
+        Debug.Log("[bake] rig=" + RigPath + " avatar=" + sourceAvatar.avatar.name
+            + " fps=" + fps + " root=" + rootMode.ToString().ToLowerInvariant());
 
         var clipPaths = new List<string>();
         foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { ClipDir }))
@@ -108,23 +146,35 @@ public static class BakeHumanoid
             // Sampling has no host to hand root motion to, so whatever the capture
             // put in the root stays in the body: the runner slides forward across a
             // cycle authored to run on the spot, and comes out facing the heading it
-            // was captured along. Measure both, then subtract them in pass 2 — the
+            // was captured along. Measure both, then correct in pass 2 — the
             // per-frame sway and bob that belong to the performance survive.
+            var rootRot = new Quaternion[frames + 1];
+            var rootPos = new Vector3[frames + 1];
             var driftStart = Vector3.zero;
             var driftEnd = Vector3.zero;
             var facingSum = Vector3.zero;
+            var facingStart = Vector3.zero;
+            var turn = 0f;            // unwrapped root yaw, so a full spin reads as 360 not 0
+            var prevYaw = 0f;
             AnimationMode.StartAnimationMode();
             for (var i = 0; i <= frames; i++)
             {
                 AnimationMode.BeginSampling();
                 AnimationMode.SampleAnimationClip(go, clip, i / fps);
                 AnimationMode.EndSampling();
+                rootRot[i] = go.transform.rotation;
+                rootPos[i] = go.transform.position;
+                var y = go.transform.rotation.eulerAngles.y;
+                if (i > 0) turn += Mathf.DeltaAngle(prevYaw, y);
+                prevYaw = y;
                 if (leftLeg != null && rightLeg != null)
                 {
                     // Which way the body points, read off the hip axis. The pelvis
                     // sways every step, so sum the whole cycle and let it cancel.
                     var axis = leftLeg.position - rightLeg.position;
-                    facingSum += new Vector3(axis.z, 0f, -axis.x);
+                    var forward = new Vector3(axis.z, 0f, -axis.x);
+                    facingSum += forward;
+                    if (i == 0) facingStart = forward;
                 }
                 if (hipBone == null) continue;
                 if (i == 0) driftStart = hipBone.position;
@@ -132,13 +182,44 @@ public static class BakeHumanoid
             }
             AnimationMode.StopAnimationMode();
 
-            var yaw = facingSum.sqrMagnitude > 1e-8f
-                ? Mathf.Atan2(facingSum.x, facingSum.z) * Mathf.Rad2Deg
-                : 0f;
-            var straighten = Quaternion.Euler(0f, -yaw, 0f);
-            var drift = straighten * new Vector3(driftEnd.x - driftStart.x, 0f, driftEnd.z - driftStart.z);
-            Debug.Log("[bake] " + go.name + ": heading " + yaw.ToString("F1") + " deg, net travel "
-                + drift.magnitude.ToString("F2") + "m — both removed");
+            Quaternion straighten;
+            Vector3 drift;
+            var origin = Vector3.zero;   // where the root starts, once straightened
+            if (rootMode == RootMode.Keep)
+            {
+                // Read the heading off the BODY at frame 0, not the root. A clip
+                // authored with Root Transform Rotation baked into pose leaves the
+                // root inert and puts the capture heading in the body, so asking
+                // the root which way the figure faces answers zero and straightens
+                // nothing — it comes out facing the direction it was captured
+                // along. Frame 0 only: summing a spin cancels to noise.
+                var yaw = facingStart.sqrMagnitude > 1e-8f
+                    ? Mathf.Atan2(facingStart.x, facingStart.z) * Mathf.Rad2Deg
+                    : 0f;
+                straighten = Quaternion.Euler(0f, -yaw, 0f);
+                origin = straighten * rootPos[0];
+                var end = straighten * rootPos[frames];
+                drift = new Vector3(end.x - origin.x, 0f, end.z - origin.z);
+                var check = straighten * facingStart;
+                Debug.Log("[bake] " + go.name + ": faced " + yaw.ToString("F1")
+                    + " deg at frame 0 — straightened to " + (Mathf.Atan2(check.x, check.z) * Mathf.Rad2Deg).ToString("F1")
+                    + " deg; root turns " + turn.ToString("F1") + " deg — kept; net travel "
+                    + drift.magnitude.ToString("F2") + "m removed");
+            }
+            else
+            {
+                var yaw = facingSum.sqrMagnitude > 1e-8f
+                    ? Mathf.Atan2(facingSum.x, facingSum.z) * Mathf.Rad2Deg
+                    : 0f;
+                straighten = Quaternion.Euler(0f, -yaw, 0f);
+                drift = straighten * new Vector3(driftEnd.x - driftStart.x, 0f, driftEnd.z - driftStart.z);
+                Debug.Log("[bake] " + go.name + ": heading " + yaw.ToString("F1") + " deg, net travel "
+                    + drift.magnitude.ToString("F2") + "m — both removed"
+                    + (Mathf.Abs(turn) > 45f
+                        ? "  *** WARNING: the root turns " + turn.ToString("F0")
+                          + " deg across this clip and flatten will discard that. BAKE_ROOT=keep preserves it. ***"
+                        : ""));
+            }
 
             // PASS 2 — record the corrected pose as plain transform curves.
             var recorder = new GameObjectRecorder(go);
@@ -149,8 +230,28 @@ public static class BakeHumanoid
                 AnimationMode.BeginSampling();
                 AnimationMode.SampleAnimationClip(go, clip, i / fps);
                 AnimationMode.EndSampling();
-                go.transform.rotation = straighten;
-                go.transform.position = -drift * ((float)i / frames);
+                var ramp = drift * ((float)i / frames);
+                if (rootMode == RootMode.Keep && hipBone != null)
+                {
+                    // Fold the root into the hips and hand back an identity root.
+                    // A correction parked on the scene root only shows up in tools
+                    // that animate that node; rigging services generally read the
+                    // skeleton and drop everything above it, so the figure arrives
+                    // facing its capture heading again. In the hips it is part of
+                    // the skeleton, and travels.
+                    var hipRot = hipBone.rotation;
+                    var hipPos = hipBone.position;
+                    go.transform.rotation = Quaternion.identity;
+                    go.transform.position = Vector3.zero;
+                    hipBone.rotation = straighten * hipRot;
+                    var p = straighten * hipPos;
+                    hipBone.position = new Vector3(p.x - origin.x - ramp.x, p.y, p.z - origin.z - ramp.z);
+                }
+                else
+                {
+                    go.transform.rotation = straighten;
+                    go.transform.position = -ramp;
+                }
                 recorder.TakeSnapshot(1f / fps);
             }
             AnimationMode.StopAnimationMode();

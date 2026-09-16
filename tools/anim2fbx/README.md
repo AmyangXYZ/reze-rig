@@ -4,6 +4,7 @@ Converts Unity Humanoid `.anim` clips to FBX, so reze-rig can read them.
 
 ```sh
 ./anim2fbx.sh out/ "Run1 slow.anim" "Run2 fast.anim"
+BAKE_FPS=60 BAKE_ROOT=keep ./anim2fbx.sh out/ SPIN_01_Elegant.anim
 ```
 
 Local tool, not part of the site.
@@ -22,9 +23,40 @@ do is recorded as ordinary transform curves, and that gets exported as FBX.
 Requires a Unity editor with the FBX Exporter package (`com.unity.formats.fbx`,
 pinned in `project/Packages/manifest.json`). It's found under Unity Hub
 automatically; override with `UNITY=/path/to/Unity`. Sample rate defaults to 30
-— `BAKE_FPS=60` for more.
+— `BAKE_FPS=60` for more. One editor runs per clip: the FBX SDK leaks its
+manager across exports and the third `FbxManager.Create()` aborts the editor
+outright, so a four-clip batch in one process dies on the third file.
 
-## What it corrects
+## Two things the root can be carrying
+
+`BAKE_ROOT` picks which.
+
+**`flatten`** (default) is for a cycle whose root holds only the heading it was
+captured along and the travel a host was meant to consume. It replaces the root
+with a fixed heading, measured off the hip axis and summed over the whole clip so
+pelvis sway cancels.
+
+**`keep`** is for a performance that turns — a spin, a step-around — and for any
+clip authored with Root Transform Rotation **baked into pose**, where the root is
+inert and the heading lives in the body. It reads the hip axis at frame 0 only,
+and folds the correction into the **hips**, handing back an identity root.
+
+The hips matter. A correction parked on the scene root leaves the exported hips
+curves byte-identical to an uncorrected bake, and rigging services read the
+skeleton and drop everything above it — so the figure arrives facing its capture
+heading again, with the log still reporting success.
+
+Averaging the hip axis across a full turn cancels to noise, so `flatten` on a
+spin imposes an arbitrary yaw. It warns when it sees a turning root; a root made
+inert by bake-into-pose gives it nothing to warn on, which is what `keep` is for.
+
+## What it checks
+
+Every exported file is read back with `tools/fbx-inspect` and the bake fails if
+it does not check out — facing, per-frame continuity, NaN, bone mapping.
+`BAKE_CHECK=0` skips it.
+
+## What flatten corrects
 
 These clips are authored for a game host that consumes root motion. Nothing
 consumes it here, so without correction it stays in the body twice over:

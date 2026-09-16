@@ -13,6 +13,10 @@
 # Env:
 #   UNITY      path to the Unity binary (default: newest under Unity Hub)
 #   BAKE_FPS   sample rate, default 30
+#   BAKE_ROOT  flatten (default) replaces the root with a fixed heading; keep
+#              preserves a root that turns, for spins and step-arounds
+#   BAKE_CHECK 1 (default) reads each exported file back and fails on a bad one;
+#              0 skips it
 #
 set -euo pipefail
 
@@ -21,7 +25,7 @@ project="$here/project"
 staging="$project/Assets/Clips"
 
 if [ $# -lt 2 ]; then
-	sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+	sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^#[[:space:]]\{0,1\}//'
 	exit 1
 fi
 
@@ -37,11 +41,7 @@ if [ ! -x "${UNITY:-}" ]; then
 	exit 1
 fi
 
-# Stage the clips. Unity only sees assets inside the project, and only clears
-# out cleanly if we take the same ones back out afterwards.
-rm -rf "$staging"
-mkdir -p "$staging"
-staged=0
+# Validate up front, so a typo doesn't surface three clips into a long bake.
 for clip in "$@"; do
 	if [ ! -f "$clip" ]; then
 		echo "anim2fbx: no such clip: $clip" >&2
@@ -51,26 +51,60 @@ for clip in "$@"; do
 		*.anim) ;;
 		*) echo "anim2fbx: not a .anim file: $clip" >&2; exit 1 ;;
 	esac
-	# Unity derives the clip's asset name — and so the output filename — from this.
-	cp "$clip" "$staging/$(basename "$clip")"
-	staged=$((staged + 1))
 done
+
 trap 'rm -rf "$staging"' EXIT
 
-echo "anim2fbx: baking $staged clip(s) with Unity $(basename "$(dirname "$(dirname "$(dirname "$(dirname "$UNITY")")")")")"
+echo "anim2fbx: baking $# clip(s) with Unity $(basename "$(dirname "$(dirname "$(dirname "$(dirname "$UNITY")")")")")"
 
-log="$(mktemp -t anim2fbx)"
-set +e
-BAKE_OUT="$out" BAKE_FPS="${BAKE_FPS:-30}" "$UNITY" \
-	-batchmode -quit -projectPath "$project" \
-	-executeMethod BakeHumanoid.Run -logFile "$log"
-status=$?
-set -e
+# One editor per clip. The FBX SDK's manager leaks across exports inside a
+# single process — the third FbxManager.Create aborts the editor outright
+# (std::overflow_error from its own hash table) — so each clip gets a fresh one.
+# Unity costs ~20s to start, which is the price of finishing at all.
+failed=0
+for clip in "$@"; do
+	name="$(basename "$clip")"
 
-grep -E '^\[bake\]' "$log" || true
-if [ $status -ne 0 ]; then
-	echo "anim2fbx: bake failed (exit $status) — full log at $log" >&2
-	exit $status
+	# Unity only sees assets inside the project, and derives the clip's asset
+	# name — and so the output filename — from what we stage.
+	rm -rf "$staging"
+	mkdir -p "$staging"
+	cp "$clip" "$staging/$name"
+
+	log="$(mktemp -t anim2fbx)"
+	set +e
+	BAKE_OUT="$out" BAKE_FPS="${BAKE_FPS:-30}" BAKE_ROOT="${BAKE_ROOT:-flatten}" "$UNITY" \
+		-batchmode -quit -projectPath "$project" \
+		-executeMethod BakeHumanoid.Run -logFile "$log"
+	status=$?
+	set -e
+
+	grep -E '^\[bake\]' "$log" || true
+	if [ $status -ne 0 ]; then
+		echo "anim2fbx: $name failed (exit $status) — full log at $log" >&2
+		failed=$((failed + 1))
+		continue
+	fi
+	rm -f "$log"
+
+	# Read the file back. The bake reports what it meant to do; a correction can
+	# be computed correctly and still land somewhere nothing downstream reads,
+	# and the log looks identical either way.
+	if [ "${BAKE_CHECK:-1}" != "0" ]; then
+		baked="$out/$(basename "$name" .anim).fbx"
+		# Only keep folds the heading into the hips, so only keep can be asserted
+		# on it. flatten leaves its correction on the scene root by design.
+		facing=""
+		[ "${BAKE_ROOT:-flatten}" = "keep" ] && facing="--facing 0"
+		if ! "$here/../fbx-inspect/fbx-inspect.sh" "$baked" --check --quiet $facing; then
+			echo "anim2fbx: $name exported, but the file does not check out" >&2
+			failed=$((failed + 1))
+		fi
+	fi
+done
+
+if [ $failed -ne 0 ]; then
+	echo "anim2fbx: $failed clip(s) failed" >&2
+	exit 1
 fi
-rm -f "$log"
 echo "anim2fbx: wrote to $out"
