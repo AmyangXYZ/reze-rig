@@ -228,6 +228,35 @@ export interface RetargetedClip {
  */
 const CONTROL_BONES = new Set(["全ての親", "センター", "下半身"])
 
+/**
+ * What MMD applies each exported local under.
+ *
+ * q_vmd is W_target(parent)⁻¹ · W_target(bone), so the parent has to be the one
+ * the TARGET will compose it with, and MMD's chain is fixed. Reading it off the
+ * source hierarchy instead only works while the two agree, and rigs disagree:
+ * a 3ds Max Biped that hangs its thighs off Spine rather than Pelvis, and its
+ * clavicles off Neck, puts the legs under 上半身 and the arms under 首, and both
+ * then swing with the chest.
+ *
+ * Only the joints where sources actually differ are pinned. Anatomy forces the
+ * rest — a knee is under a thigh in every rig — and the source walk gets those
+ * right. The helper bones in the real chain (腰, グルーブ, 腰キャンセル*, 肩P/肩C)
+ * are never animated here, so the effective parent skips them. A pin that the
+ * clip does not map falls through to the next one up, which is how a rig with no
+ * chest joint lands its shoulders on 上半身. センター terminates the walk: it
+ * carries no rotation, so the bone's local IS its world.
+ */
+const MMD_PARENT: Record<string, string> = {
+  下半身: "センター",
+  上半身: "センター",
+  上半身2: "上半身",
+  首: "上半身2",
+  左肩: "上半身2",
+  右肩: "上半身2",
+  左足: "下半身",
+  右足: "下半身",
+}
+
 /* ============================================================================
  * FK helpers.
  * ========================================================================= */
@@ -278,9 +307,12 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
   const nameToIdx = new Map<string, number>()
   for (let i = 0; i < n; i++) if (!nameToIdx.has(bones[i].name)) nameToIdx.set(bones[i].name, i)
 
-  // Pass 1: mapped bone list with nearest mapped ancestor (true + engine-adjusted).
+  // Pass 1: mapped bone list with the parent MMD will compose each local with.
   const mappedBones: MappedBone[] = []
-  const trueParentByMmd = new Map<string, string | null>()
+  const mappedMmd = new Set<string>()
+  for (const [srcName, mmdName] of Object.entries(options.nameMap)) {
+    if (nameToIdx.has(srcName)) mappedMmd.add(mmdName)
+  }
   for (const [srcName, mmdName] of Object.entries(options.nameMap)) {
     const srcIdx = nameToIdx.get(srcName)
     if (srcIdx === undefined) continue
@@ -295,18 +327,12 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
       }
       p = bones[p].parentIndex
     }
-    trueParentByMmd.set(mmdName, parentMmdName)
-
-    // 上半身's real PMX parent chain is 腰 ← グルーブ ← センター — it never inherits
-    // 下半身 (source spines usually sit under the pelvis, so the walk lands on
-    // 下半身). 腰/グルーブ are never animated here, so its effective parent is
-    // センター. The legs are NOT overridden: their real chain is 腰キャンセル左/右
-    // ← 下半身, and the キャンセル bones cancel 腰's rotation (which stays
-    // identity), not 下半身's — the engine really does apply 下半身's rotation to
-    // the leg chain, so leg locals must subtract it.
-    if (parentMmdName === "下半身" && mmdName === "上半身") {
-      parentMmdName = "センター"
-    }
+    // Where MMD's own chain is fixed, say so, rather than trusting the source
+    // to be arranged the same way. Falls through to the next parent up for any
+    // this clip does not map.
+    let pinned: string | undefined = MMD_PARENT[mmdName]
+    while (pinned && pinned !== "センター" && !mappedMmd.has(pinned)) pinned = MMD_PARENT[pinned]
+    if (pinned) parentMmdName = pinned
 
     mappedBones.push({ srcName, mmdName, srcIdx, parentMmdName, frameAlign: null, alignDot: null })
   }
@@ -324,9 +350,14 @@ export function createCoreContext(source: RetargetSource, options: RetargetCoreO
   // roll between parent and child.) Gate at dot > 0: below that the segments
   // are different anatomy, not a rest-angle difference.
   const targetPos = options.targetPositions ?? {}
+  // Paired down the same chain the locals are built against. The segment wanted
+  // here is the skeletal continuation, and the source hierarchy is not always a
+  // statement about anatomy: the Biped that hangs its thighs off Spine made the
+  // chest's segment an average of two thigh directions pointing down against one
+  // neck direction pointing up, which left the upper body tilted forward.
   const mappedChildren = new Map<string, MappedBone[]>()
   for (const b of mappedBones) {
-    const tp = trueParentByMmd.get(b.mmdName)
+    const tp = b.parentMmdName
     if (!tp) continue
     const arr = mappedChildren.get(tp)
     if (arr) arr.push(b)
