@@ -58,3 +58,6 @@ scripts/.dump-run.mjs
 
 # Working notes, not part of the published repo.
 /notes/
+
+# Camera conversion test files (not distributed)
+/public/fbx/camera/

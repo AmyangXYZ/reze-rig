@@ -1607,6 +1607,24 @@ export function createSourcePreview(clip: AnimationClip, opts?: RetargetOptions)
 	};
 }
 
+/**
+ * How tall the source figure stands at bind: ankles to head bone, in the file's
+ * own units, stood upright like the retarget stands her. Null without a head or
+ * feet to measure.
+ */
+export function measureFigureHeight(clip: AnimationClip, opts?: RetargetOptions): number | null {
+	const { source, core } = buildFbxCore(clip, opts);
+	const at = (name: string): V3 | null => {
+		const i = source.bones.findIndex((b) => b.name === name);
+		return i >= 0 ? core.bindWorldPos[i] : null;
+	};
+	const head = at('Head');
+	const ankle = Math.min(at('LeftFoot')?.[1] ?? Infinity, at('RightFoot')?.[1] ?? Infinity);
+	if (!head || !Number.isFinite(ankle)) return null;
+	const height = head[1] - ankle;
+	return height > 0 ? height : null;
+}
+
 function depthOf(c: string, parentCache: Map<string, string | null>, guard = 0): number {
 	if (guard > 64) return guard;
 	const p = parentCache.get(c);

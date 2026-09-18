@@ -1485,7 +1485,7 @@ function eulerToQuatIntrinsicZYX(x: number, y: number, z: number): Quat {
 
 /** FBX's RotationOrder enum, in its own numbering. 6 is spherical XYZ, which
  *  no rig here uses; it falls back to the default. */
-const FBX_ROTATION_ORDERS: Record<number, string> = {
+export const FBX_ROTATION_ORDERS: Record<number, string> = {
 	0: 'XYZ', 1: 'XZY', 2: 'YZX', 3: 'YXZ', 4: 'ZXY', 5: 'ZYX', 6: 'XYZ',
 };
 
@@ -1499,7 +1499,7 @@ const REVERSED_ORDER: Record<string, Parameters<typeof Quat.fromEulerOrder>[3]> 
 // only because every rig it ever saw was really the FBX default, XYZ. It now
 // reads the order the file declares and reverses it into composition sequence,
 // which leaves those files on exactly the same path.
-function eulerToQuaternionByOrder(x: number, y: number, z: number, order: string): Quat {
+export function eulerToQuaternionByOrder(x: number, y: number, z: number, order: string): Quat {
 	const composition = REVERSED_ORDER[order];
 	if (!composition) return Quat.identity();
 	return Quat.fromEulerOrder(x, y, z, composition);

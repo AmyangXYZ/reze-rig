@@ -11,12 +11,17 @@
  * reference defaults to an Idle.fbx found among the inputs — Unity/UE per-pose
  * exports embed a mid-cycle stride as their rest pose, so anchoring them to the
  * idle keeps "delta from rest" honest; Mixamo-shaped clips ignore it.
+ *
+ * A camera FBX (an animated camera, no skeleton) writes a camera VMD. Its scene
+ * unit comes from the figure it films: `X.character.fbx`, among the inputs or
+ * beside `X.camera.fbx` (see sceneScale).
  */
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs"
 import { basename, join } from "node:path"
 
 import { parseFbxToAnimationClips } from "../lib/fbx"
-import { buildBindReferenceFromClip, measureTargetPositions, retargetClips } from "../lib/retarget"
+import { cameraToMmd, readCameraFbx, sceneScale } from "../lib/fbx-camera"
+import { buildBindReferenceFromClip, measureFigureHeight, measureTargetPositions, retargetClips } from "../lib/retarget"
 import { toEngineClip } from "../lib/engine-clip"
 import { VMDWriter, PmxLoader } from "reze-engine"
 
@@ -115,11 +120,40 @@ function main(): void {
   if (outDir) mkdirSync(outDir, { recursive: true })
   const writer = new VMDWriter()
 
+  // The figure a camera films, by name: X.camera.fbx ↔ X.character.fbx.
+  const figureOf = (cameraFile: string): { height: number | null; from: string | null } => {
+    if (!/\.camera\.fbx$/i.test(cameraFile)) return { height: null, from: null }
+    const sibling = cameraFile.replace(/\.camera\.fbx$/i, ".character.fbx")
+    const from =
+      files.find((f) => basename(f).toLowerCase() === basename(sibling).toLowerCase()) ??
+      (existsSync(sibling) ? sibling : null)
+    if (!from) return { height: null, from: null }
+    const [clip] = parseFbxToAnimationClips(toArrayBuffer(readFileSync(from)))
+    return { height: clip ? measureFigureHeight(clip) : null, from }
+  }
+
   let ok = 0
   for (const file of files) {
     const name = basename(file).replace(/\.fbx$/i, "")
     try {
-      const clips = parseFbxToAnimationClips(toArrayBuffer(readFileSync(file)))
+      const buffer = toArrayBuffer(readFileSync(file))
+      const camera = readCameraFbx(buffer)
+      if (camera) {
+        const figure = figureOf(file)
+        const scale = sceneScale(figure.height)
+        const vmd = writer.writeCamera(cameraToMmd(camera, scale))
+        writeFileSync(join(outDir ?? join(file, ".."), `${name}.vmd`), Buffer.from(vmd))
+        console.log(
+          `${name}.vmd  (camera, ${camera.frames.length} keys, ×${scale.toFixed(3)} — ` +
+          (figure.from && figure.height
+            ? `${basename(figure.from)} stands ${figure.height.toFixed(3)} units`
+            : "no figure, scene taken as metres") +
+          `, ${(vmd.byteLength / 1024).toFixed(0)} KB)`
+        )
+        ok++
+        continue
+      }
+      const clips = parseFbxToAnimationClips(buffer)
       if (clips.length === 0) throw new Error("no animation clips")
       if (clips.length > 1) console.warn(`${name}: ${clips.length} clips, converting the first`)
       const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace, footIK })
