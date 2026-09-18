@@ -213,6 +213,22 @@ const normalize = (v: V3): V3 => {
 	return [v[0] / l, v[1] / l, v[2] / l];
 };
 
+/** How far down the view axis a point sits; its straight-line distance for the
+ *  rare shot that looks away from it. */
+function depthOf(p: V3, eye: V3, forward: V3): number {
+	const v: V3 = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+	const depth = v[0] * forward[0] + v[1] * forward[1] + v[2] * forward[2];
+	return depth > 0 ? depth : Math.hypot(v[0], v[1], v[2]);
+}
+
+/** Along the view axis to its nearest pass by the origin's vertical line; the
+ *  eye's own distance from that line when the shot looks away from it. */
+function axisDepth(eye: V3, forward: V3): number {
+	const flat = forward[0] * forward[0] + forward[2] * forward[2];
+	const along = flat > 1e-6 ? -(eye[0] * forward[0] + eye[2] * forward[2]) / flat : 0;
+	return along > 0 ? along : Math.hypot(eye[0], eye[2]);
+}
+
 /** The multiple of 2π that puts `angle` nearest `previous`. */
 function unwrap(angle: number, previous: number): number {
 	return angle + 2 * Math.PI * Math.round((previous - angle) / (2 * Math.PI));
@@ -247,14 +263,18 @@ export function sceneScale(figureHeight: number | null): number {
  * frame, because MMD interpolates the euler angles themselves and a wrap from
  * +179° to −179° would swing the long way round between two keys.
  *
- * Target: where the view axis passes the vertical line through the scene
- * origin, where the character stands, so the keyframes read in MMD as a camera
- * looking toward her. The eye is exact whatever the target; the target decides
- * how the keys read when edited.
+ * Target: the figure the shot films (`subject`, MMD world) carried onto the
+ * view axis, so the keyframes read in MMD as a camera looking at her. Without
+ * one, where the view axis passes the vertical line through the scene origin,
+ * where she stands.
  *
- * Lens: MMD stores the vertical angle in whole degrees, so it is rounded.
+ * Lens: MMD stores the vertical angle in whole degrees. Keyed every frame, a
+ * zoom turns into a staircase that pops her size ~4% per degree, so the eye
+ * slides along the view axis by the rounded fraction: at the target the frame
+ * spans exactly what the source's did, and she zooms smoothly. An angle that is
+ * already whole leaves the eye where the source put it.
  */
-export function cameraToMmd(camera: FbxCamera, scale: number): CameraKeyframe[] {
+export function cameraToMmd(camera: FbxCamera, scale: number, subject?: (t: number) => V3): CameraKeyframe[] {
 	const keys: CameraKeyframe[] = [];
 	let yaw = 0;
 	let roll = 0;
@@ -270,18 +290,16 @@ export function cameraToMmd(camera: FbxCamera, scale: number): CameraKeyframe[] 
 		yaw = i === 0 ? Math.atan2(forward[0], forward[2]) : unwrap(Math.atan2(forward[0], forward[2]), yaw);
 		roll = i === 0 ? Math.atan2(right[1], up[1]) : unwrap(Math.atan2(right[1], up[1]), roll);
 
-		// Along the view axis to its nearest pass by the origin's vertical line;
-		// the eye's own distance from that line when the shot looks away from it.
-		const flat = forward[0] * forward[0] + forward[2] * forward[2];
-		const along = flat > 1e-6 ? -(eye[0] * forward[0] + eye[2] * forward[2]) / flat : 0;
-		const reach = Math.max(1, along > 0 ? along : Math.hypot(eye[0], eye[2]));
+		const reach = Math.max(1, subject ? depthOf(subject(i / FPS), eye, forward) : axisDepth(eye, forward));
+		const fov = Math.max(1, Math.round(frame.fovY));
+		const back = (reach * Math.tan((frame.fovY * DEG) / 2)) / Math.tan((fov * DEG) / 2);
 
 		keys.push({
 			frame: i,
-			distance: -reach,
+			distance: -back,
 			target: new Vec3(eye[0] + forward[0] * reach, eye[1] + forward[1] * reach, eye[2] + forward[2] * reach),
 			rotation: new Vec3(-pitch, -yaw, -roll),
-			fov: Math.max(1, Math.round(frame.fovY)),
+			fov,
 		});
 	});
 	return keys;

@@ -12,16 +12,16 @@
  * exports embed a mid-cycle stride as their rest pose, so anchoring them to the
  * idle keeps "delta from rest" honest; Mixamo-shaped clips ignore it.
  *
- * A camera FBX (an animated camera, no skeleton) writes a camera VMD. Its scene
- * unit comes from the figure it films: `X.character.fbx`, among the inputs or
- * beside `X.camera.fbx` (see sceneScale).
+ * A camera FBX (an animated camera, no skeleton) writes a camera VMD. The figure
+ * it films — `X.character.fbx`, among the inputs or beside `X.camera.fbx` —
+ * gives the scene its unit (see sceneScale) and the shot its subject.
  */
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs"
 import { basename, join } from "node:path"
 
 import { parseFbxToAnimationClips } from "../lib/fbx"
 import { cameraToMmd, readCameraFbx, sceneScale } from "../lib/fbx-camera"
-import { buildBindReferenceFromClip, measureFigureHeight, measureTargetPositions, retargetClips } from "../lib/retarget"
+import { buildBindReferenceFromClip, createSourcePreview, measureFigureHeight, measureTargetPositions, retargetClips } from "../lib/retarget"
 import { toEngineClip } from "../lib/engine-clip"
 import { VMDWriter, PmxLoader } from "reze-engine"
 
@@ -121,15 +121,30 @@ function main(): void {
   const writer = new VMDWriter()
 
   // The figure a camera films, by name: X.camera.fbx ↔ X.character.fbx.
-  const figureOf = (cameraFile: string): { height: number | null; from: string | null } => {
-    if (!/\.camera\.fbx$/i.test(cameraFile)) return { height: null, from: null }
+  // Her height, and where she is at time t: midway between hips and head, in
+  // her file's units, left-handed like the shot.
+  type Figure = { height: number | null; at: ((t: number) => [number, number, number]) | null; from: string | null }
+  const figureOf = (cameraFile: string): Figure => {
+    const none: Figure = { height: null, at: null, from: null }
+    if (!/\.camera\.fbx$/i.test(cameraFile)) return none
     const sibling = cameraFile.replace(/\.camera\.fbx$/i, ".character.fbx")
     const from =
       files.find((f) => basename(f).toLowerCase() === basename(sibling).toLowerCase()) ??
       (existsSync(sibling) ? sibling : null)
-    if (!from) return { height: null, from: null }
+    if (!from) return none
     const [clip] = parseFbxToAnimationClips(toArrayBuffer(readFileSync(from)))
-    return { height: clip ? measureFigureHeight(clip) : null, from }
+    if (!clip) return { ...none, from }
+    const preview = createSourcePreview(clip)
+    const hips = preview.bones.findIndex((b) => b.name === "Hips")
+    const head = preview.bones.findIndex((b) => b.name === "Head")
+    const at =
+      hips >= 0 && head >= 0
+        ? (t: number): [number, number, number] => {
+            const p = preview.positionsAt(t)
+            return [(p[hips][0] + p[head][0]) / 2, (p[hips][1] + p[head][1]) / 2, (p[hips][2] + p[head][2]) / 2]
+          }
+        : null
+    return { height: measureFigureHeight(clip), at, from }
   }
 
   let ok = 0
@@ -141,7 +156,9 @@ function main(): void {
       if (camera) {
         const figure = figureOf(file)
         const scale = sceneScale(figure.height)
-        const vmd = writer.writeCamera(cameraToMmd(camera, scale))
+        const at = figure.at
+        const subject = at ? (t: number) => at(t).map((v) => v * scale) as [number, number, number] : undefined
+        const vmd = writer.writeCamera(cameraToMmd(camera, scale, subject))
         writeFileSync(join(outDir ?? join(file, ".."), `${name}.vmd`), Buffer.from(vmd))
         console.log(
           `${name}.vmd  (camera, ${camera.frames.length} keys, ×${scale.toFixed(3)} — ` +
