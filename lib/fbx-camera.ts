@@ -234,6 +234,46 @@ function unwrap(angle: number, previous: number): number {
 	return angle + 2 * Math.PI * Math.round((previous - angle) / (2 * Math.PI));
 }
 
+/** A cut: the eye turns further in one frame than a shot's camera move does. */
+const CUT_TURN_DEG = 20;
+/** ...or jumps further than this many times the clip's typical frame-to-frame move. */
+const CUT_MOVE_RATIO = 25;
+
+/**
+ * The whole-degree angle each frame is keyed with: one per shot, the source's
+ * median angle rounded. Shots split where the camera cuts — a turn or jump no
+ * camera move makes in one frame. Within a shot the eye's slide (cameraToMmd)
+ * then follows the source angle continuously instead of stepping each time a
+ * per-frame round flips.
+ */
+function shotFov(frames: FbxCamera['frames']): number[] {
+	const n = frames.length;
+	const moves: number[] = [];
+	for (let i = 1; i < n; i++) {
+		const a = frames[i - 1].position;
+		const b = frames[i].position;
+		moves.push(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
+	}
+	const typical = [...moves].sort((x, y) => x - y)[Math.floor(moves.length / 2)] ?? 0;
+	const cut = (i: number): boolean => {
+		const f0 = frames[i - 1].forward;
+		const f1 = frames[i].forward;
+		const dot = Math.max(-1, Math.min(1, f0[0] * f1[0] + f0[1] * f1[1] + f0[2] * f1[2]));
+		const turn = Math.acos(dot) / DEG;
+		return turn > CUT_TURN_DEG || (typical > 0 && moves[i - 1] > typical * CUT_MOVE_RATIO);
+	};
+	const held = new Array<number>(n);
+	let start = 0;
+	for (let i = 1; i <= n; i++) {
+		if (i < n && !cut(i)) continue;
+		const angles = frames.slice(start, i).map((f) => f.fovY).sort((x, y) => x - y);
+		const fov = Math.max(1, Math.round(angles[Math.floor(angles.length / 2)]));
+		for (let k = start; k < i; k++) held[k] = fov;
+		start = i;
+	}
+	return held;
+}
+
 /**
  * MMD units per unit of the scene a camera was shot in.
  *
@@ -269,13 +309,18 @@ export function sceneScale(figureHeight: number | null): number {
  * where she stands.
  *
  * Lens: MMD stores the vertical angle in whole degrees. Keyed every frame, a
- * zoom turns into a staircase that pops her size ~4% per degree, so the eye
- * slides along the view axis by the rounded fraction: at the target the frame
- * spans exactly what the source's did, and she zooms smoothly. An angle that is
+ * zoom turns into a staircase that pops her size ~4% per degree, so each shot
+ * holds one whole angle (shotFov) and the eye slides along the view axis by
+ * the fraction the source's angle differs from it: at the target the frame
+ * spans exactly what the source's did, and she zooms smoothly. Rounding each
+ * frame instead flipped that fraction from about −1.7% to +1.7% whenever the
+ * source angle crossed a half degree — a one-frame dolly of ~3.5%, 26 times in
+ * a 30 s zooming shot (109501 touch1), read as jitter. An angle that is
  * already whole leaves the eye where the source put it.
  */
 export function cameraToMmd(camera: FbxCamera, scale: number, subject?: (t: number) => V3): CameraKeyframe[] {
 	const keys: CameraKeyframe[] = [];
+	const heldFov = shotFov(camera.frames);
 	let yaw = 0;
 	let roll = 0;
 	camera.frames.forEach((frame, i) => {
@@ -291,7 +336,7 @@ export function cameraToMmd(camera: FbxCamera, scale: number, subject?: (t: numb
 		roll = i === 0 ? Math.atan2(right[1], up[1]) : unwrap(Math.atan2(right[1], up[1]), roll);
 
 		const reach = Math.max(1, subject ? depthOf(subject(i / FPS), eye, forward) : axisDepth(eye, forward));
-		const fov = Math.max(1, Math.round(frame.fovY));
+		const fov = heldFov[i];
 		const back = (reach * Math.tan((frame.fovY * DEG) / 2)) / Math.tan((fov * DEG) / 2);
 
 		keys.push({
