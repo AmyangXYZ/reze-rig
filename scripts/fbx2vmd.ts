@@ -82,13 +82,14 @@ function main(): void {
     else if (args[i] === "--in-place") inPlace = true
     else if (args[i] === "--no-bind-ref") noBindRef = true
     else if (args[i] === "--foot-ik") footIK = true
+    else if (args[i] === "--no-foot-ik") footIK = false
     else if (args[i] === "--bind-ref") bindRefPath = args[++i]
     else if (args[i] === "--target-pmx") targetPmxPath = args[++i]
     else inputs.push(args[i])
   }
   if (inputs.length === 0) {
     console.error(
-      "usage: fbx2vmd <files-or-dirs...> [--out <dir>] [--target-pmx <model.pmx>] [--in-place] [--foot-ik] [--bind-ref <idle.fbx>]"
+      "usage: fbx2vmd <files-or-dirs...> [--out <dir>] [--target-pmx <model.pmx>] [--in-place] [--no-foot-ik] [--bind-ref <idle.fbx>]"
     )
     process.exit(1)
   }
