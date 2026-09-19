@@ -1,4 +1,4 @@
-import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe } from "reze-engine"
+import type { AnimationClip, BoneInterpolation, BoneKeyframe, IkKeyframe, MorphKeyframe } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 import type { RetargetedClip } from "./retarget-core"
 
@@ -28,7 +28,11 @@ const LINEAR: BoneInterpolation = {
 const IK_DISABLED_BONES = ["右足IK親", "左足IK親", "右足ＩＫ", "左足ＩＫ", "右つま先ＩＫ", "左つま先ＩＫ"]
 const FOOT_IK_BONES = new Set(["右足ＩＫ", "左足ＩＫ"])
 
-export function toEngineClip(clip: RetargetedClip, fps = 30): AnimationClip {
+export function toEngineClip(
+  clip: RetargetedClip,
+  fps = 30,
+  morphTracks: Map<string, MorphKeyframe[]> = new Map(),
+): AnimationClip {
   const boneTracks = new Map<string, BoneKeyframe[]>()
   let frameCount = 1
 
@@ -79,7 +83,11 @@ export function toEngineClip(clip: RetargetedClip, fps = 30): AnimationClip {
     ikTracks.set(name, [{ frame: 0, enabled: false }])
   }
 
-  return { boneTracks, morphTracks: new Map(), ikTracks, frameCount }
+  for (const frames of morphTracks.values()) {
+    for (const kf of frames) if (kf.frame + 1 > frameCount) frameCount = kf.frame + 1
+  }
+
+  return { boneTracks, morphTracks, ikTracks, frameCount }
 }
 
 /** Trigger a browser download of binary data. */

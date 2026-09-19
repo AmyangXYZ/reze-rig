@@ -61,3 +61,6 @@ scripts/.dump-run.mjs
 
 # Camera conversion test files (not distributed)
 /public/fbx/camera/
+
+# Morph conversion test files (not distributed)
+/109501-/

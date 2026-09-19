@@ -12,6 +12,10 @@
  * exports embed a mid-cycle stride as their rest pose, so anchoring them to the
  * idle keeps "delta from rest" honest; Mixamo-shaped clips ignore it.
  *
+ * A motion's blend-shape animation rides in its VMD as morphs, named for the
+ * target model when --target-pmx gives one (see MORPH_MAP), with each eye
+ * showing as much as the source's (see fitEyelids).
+ *
  * A camera FBX (an animated camera, no skeleton) writes a camera VMD. The figure
  * it films — `X.character.fbx`, among the inputs or beside `X.camera.fbx` —
  * gives the scene its unit (see sceneScale) and the shot its subject.
@@ -21,9 +25,10 @@ import { basename, join } from "node:path"
 
 import { parseFbxToAnimationClips } from "../lib/fbx"
 import { cameraToMmd, readCameraFbx, sceneScale } from "../lib/fbx-camera"
+import { readMorphTracks, readSourceEyelids, readTargetEyelids, toMmdMorphTracks, type Eyelids } from "../lib/fbx-morph"
 import { buildBindReferenceFromClip, createSourcePreview, measureFigureHeight, measureTargetPositions, retargetClips } from "../lib/retarget"
 import { toEngineClip } from "../lib/engine-clip"
-import { VMDWriter, PmxLoader } from "reze-engine"
+import { VMDWriter, PmxLoader, readPmxDocument } from "reze-engine"
 
 interface MmdSkeletonDump {
   bones: { name: string; worldPosition: number[] }[]
@@ -35,11 +40,19 @@ interface MmdSkeletonDump {
  *  bind-translation accumulation drifted from the runtime skeleton and left
  *  constant per-bone alignment offsets (visible at the ankles: feet swaying
  *  with the body instead of planted). One code path, one truth. */
-function measurePmxTargetPositions(pmxPath: string): Record<string, [number, number, number]> {
-  const buf = readFileSync(pmxPath)
-  const model = PmxLoader.loadFromBuffer(toArrayBuffer(buf))
+function measurePmxTarget(pmxPath: string): {
+  positions: Record<string, [number, number, number]>
+  morphs: Set<string>
+  eyelids: Eyelids | null
+} {
+  const buf = toArrayBuffer(readFileSync(pmxPath))
+  const model = PmxLoader.loadFromBuffer(buf)
   model.update(1 / 60) // settled rest frame, exactly like the site before measuring
-  return measureTargetPositions((n) => model.getBoneWorldPosition(n))
+  return {
+    positions: measureTargetPositions((n) => model.getBoneWorldPosition(n)),
+    morphs: new Set(model.getMorphing().morphs.map((m) => m.name)),
+    eyelids: readTargetEyelids(readPmxDocument(buf)),
+  }
 }
 
 function collectFbx(path: string, out: string[]): void {
@@ -89,8 +102,13 @@ function main(): void {
   }
 
   let targetPositions: Record<string, [number, number, number]>
+  let targetMorphs: Set<string> | undefined
+  let targetEyelids: Eyelids | null = null
   if (targetPmxPath) {
-    targetPositions = measurePmxTargetPositions(targetPmxPath)
+    const target = measurePmxTarget(targetPmxPath)
+    targetPositions = target.positions
+    targetMorphs = target.morphs
+    targetEyelids = target.eyelids
     console.log(`target skeleton: measured from ${targetPmxPath}`)
   } else {
     // Legacy fallback; prefer --target-pmx so alignment respects the actual model.
@@ -174,10 +192,22 @@ function main(): void {
       if (clips.length === 0) throw new Error("no animation clips")
       if (clips.length > 1) console.warn(`${name}: ${clips.length} clips, converting the first`)
       const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace, footIK })
-      const vmd = writer.write(toEngineClip(mmd))
+      const morphSource = readMorphTracks(buffer)
+      const sourceEyelids = morphSource.length && targetEyelids ? readSourceEyelids(buffer) : null
+      const lids = sourceEyelids && targetEyelids ? { source: sourceEyelids, target: targetEyelids } : undefined
+      const { morphTracks, unmapped } = toMmdMorphTracks(morphSource, targetMorphs, lids)
+      const vmd = writer.write(toEngineClip(mmd, 30, morphTracks))
       const outPath = join(outDir ?? join(file, ".."), `${name}.vmd`)
       writeFileSync(outPath, Buffer.from(vmd))
-      console.log(`${name}.vmd  (${(vmd.byteLength / 1024).toFixed(0)} KB)`)
+      console.log(
+        `${name}.vmd  (${(vmd.byteLength / 1024).toFixed(0)} KB` +
+        (morphSource.length
+          ? `, ${morphTracks.size} morphs from ${morphSource.length - unmapped.length}/${morphSource.length} channels` +
+            (lids ? `, eyes fitted ×${(lids.source.size / lids.target.size).toFixed(2)}` : "") +
+            (unmapped.length ? `, unmapped: ${unmapped.join(" ")}` : "")
+          : "") +
+        ")"
+      )
       ok++
     } catch (e) {
       console.error(`FAILED ${name}: ${e instanceof Error ? e.message : String(e)}`)
